@@ -8,6 +8,7 @@ venv/
 # PyInstaller build artifacts
 build/
 dist/
+installer_out/
 *.manifest
 
 # Dev-only: raw ao-bin-dumps downloads used to regenerate recipes.json / names_es.json
