@@ -111,6 +111,45 @@ class NumericItem(QTableWidgetItem):
         return a < b
 
 
+# ---------- i18n-aware widgets ----------
+# Each remembers its English source string so a tab's retranslate() can re-apply
+# the current language by walking its children — no per-widget ref bookkeeping.
+
+
+class TransLabel(QLabel):
+    def __init__(self, key: str):
+        super().__init__(tr(key))
+        self._key = key
+
+    def retranslate(self):
+        self.setText(tr(self._key))
+
+
+class TransButton(QPushButton):
+    def __init__(self, key: str):
+        super().__init__(tr(key))
+        self._key = key
+
+    def retranslate(self):
+        self.setText(tr(self._key))
+
+
+class TransCheck(QCheckBox):
+    def __init__(self, key: str):
+        super().__init__(tr(key))
+        self._key = key
+
+    def retranslate(self):
+        self.setText(tr(self._key))
+
+
+def retranslate_children(widget):
+    """Re-apply the current language to every Trans* widget under `widget`."""
+    for cls in (TransLabel, TransButton, TransCheck):
+        for w in widget.findChildren(cls):
+            w.retranslate()
+
+
 # ---------- Workers ----------
 
 
@@ -265,75 +304,84 @@ class RefiningDetailDialog(QDialog):
         if r.get("margin") is None:
             return RefiningDetailDialog._build_incomplete_text(r)
         lines = [f"=== {r['label']} ===", ""]
-        lines.append(f"Recipe: {r['raws_per']} raw + {r['prev_per']} prev-tier refined")
-        lines.append(f"Refine city: {r['refine_city']} ({r['refine_note']})")
-        lines.append(f"Return rate (no focus): {r['return_rate'] * 100:.1f}%")
+        lines.append(tr("Recipe: {raws} raw + {prev} prev-tier refined").format(
+            raws=r['raws_per'], prev=r['prev_per']))
+        lines.append(tr("Refine city: {city} ({note})").format(
+            city=r['refine_city'], note=r['refine_note']))
+        lines.append(tr("Return rate (no focus): {pct}%").format(pct=f"{r['return_rate'] * 100:.1f}"))
         lines.append("")
-        lines.append("--- Inputs ---")
+        lines.append(tr("--- Inputs ---"))
         lines.append(
-            f"Raw: buy {r['raws_per']}x in {r['buy_city']} @ {r['buy_price']:,} = "
-            f"{r['raws_per'] * r['buy_price']:,} silver"
+            tr("Raw: buy {qty}x in {city} @ {price} = {total} silver").format(
+                qty=r['raws_per'], city=r['buy_city'], price=f"{r['buy_price']:,}",
+                total=f"{r['raws_per'] * r['buy_price']:,}")
         )
         if r["prev_per"] > 0:
             lines.append(
-                f"Prev-tier refined: buy {r['prev_per']}x in {r['prev_buy_city']} @ "
-                f"{r['prev_buy_price']:,} = {r['prev_per'] * r['prev_buy_price']:,} silver"
+                tr("Prev-tier refined: buy {qty}x in {city} @ {price} = {total} silver").format(
+                    qty=r['prev_per'], city=r['prev_buy_city'], price=f"{r['prev_buy_price']:,}",
+                    total=f"{r['prev_per'] * r['prev_buy_price']:,}")
             )
-        lines.append(f"Gross input cost: {int(round(r['gross_input'])):,} silver")
+        lines.append(tr("Gross input cost: {v} silver").format(v=f"{int(round(r['gross_input'])):,}"))
         lines.append(
-            f"Effective input cost (after {r['return_rate'] * 100:.1f}% return): "
-            f"{int(round(r['effective_input'])):,} silver"
+            tr("Effective input cost (after {pct}% return): {v} silver").format(
+                pct=f"{r['return_rate'] * 100:.1f}", v=f"{int(round(r['effective_input'])):,}")
         )
         lines.append("")
-        lines.append("--- Output ---")
-        lines.append(f"Sell 1x refined in {r['sell_city']} @ {r['sell_price']:,} silver")
+        lines.append(tr("--- Output ---"))
+        lines.append(tr("Sell 1x refined in {city} @ {price} silver").format(
+            city=r['sell_city'], price=f"{r['sell_price']:,}"))
         lines.append("")
-        lines.append(f"NET MARGIN per refined unit: {r['margin']:,} silver")
+        lines.append(tr("NET MARGIN per refined unit: {v} silver").format(v=f"{r['margin']:,}"))
         lines.append("")
-        lines.append("--- Route ---")
-        route = [f"1. Buy raws in {r['buy_city']}"]
+        lines.append(tr("--- Route ---"))
+        route = [tr("1. Buy raws in {city}").format(city=r['buy_city'])]
         if r["prev_per"] > 0 and r["prev_buy_city"] != r["buy_city"]:
-            route.append(f"2. Buy prev-tier refined in {r['prev_buy_city']}")
+            route.append(tr("2. Buy prev-tier refined in {city}").format(city=r['prev_buy_city']))
         n = len(route) + 1
-        route.append(f"{n}. Refine in {r['refine_city']}")
-        route.append(f"{n + 1}. Sell refined in {r['sell_city']}")
+        route.append(tr("{n}. Refine in {city}").format(n=n, city=r['refine_city']))
+        route.append(tr("{n}. Sell refined in {city}").format(n=n + 1, city=r['sell_city']))
         lines.extend(route)
         lines.append("")
-        lines.append("--- Data freshness ---")
-        lines.append(f"Raw: {_fmt_age(r['buy_age'])} old ({_abs_timestamp(r['buy_age'])})")
+        lines.append(tr("--- Data freshness ---"))
+        lines.append(tr("Raw: {age} old ({ts})").format(
+            age=_fmt_age(r['buy_age']), ts=_abs_timestamp(r['buy_age'])))
         if r["prev_buy_age"] is not None:
             lines.append(
-                f"Prev refined: {_fmt_age(r['prev_buy_age'])} old "
-                f"({_abs_timestamp(r['prev_buy_age'])})"
+                tr("Prev refined: {age} old ({ts})").format(
+                    age=_fmt_age(r['prev_buy_age']), ts=_abs_timestamp(r['prev_buy_age']))
             )
-        lines.append(f"Refined: {_fmt_age(r['sell_age'])} old ({_abs_timestamp(r['sell_age'])})")
+        lines.append(tr("Refined: {age} old ({ts})").format(
+            age=_fmt_age(r['sell_age']), ts=_abs_timestamp(r['sell_age'])))
         return "\n".join(lines)
 
     @staticmethod
     def _build_incomplete_text(r: dict) -> str:
         lines = [f"=== {r['label']} ===", ""]
-        lines.append("Incomplete data — can't compute an honest margin.")
-        lines.append("Missing live price(s): " + ", ".join(r.get("missing") or ["unknown"]))
+        lines.append(tr("Incomplete data — can't compute an honest margin."))
+        lines.append(tr("Missing live price(s): ") + ", ".join(r.get("missing") or [tr("unknown")]))
         lines.append("")
-        lines.append("--- What we do have ---")
+        lines.append(tr("--- What we do have ---"))
         if r["buy_price"] is not None:
-            lines.append(f"Raw: buy in {r['buy_city']} @ {r['buy_price']:,} silver")
+            lines.append(tr("Raw: buy in {city} @ {price} silver").format(
+                city=r['buy_city'], price=f"{r['buy_price']:,}"))
         else:
-            lines.append("Raw: no live price")
+            lines.append(tr("Raw: no live price"))
         if r["prev_per"] > 0:
             if r["prev_buy_price"]:
                 lines.append(
-                    f"Prev-tier refined: buy in {r['prev_buy_city']} @ "
-                    f"{r['prev_buy_price']:,} silver"
+                    tr("Prev-tier refined: buy in {city} @ {price} silver").format(
+                        city=r['prev_buy_city'], price=f"{r['prev_buy_price']:,}")
                 )
             else:
-                lines.append("Prev-tier refined: no live price")
+                lines.append(tr("Prev-tier refined: no live price"))
         if r["sell_price"] is not None:
-            lines.append(f"Refined sell order: {r['sell_city']} @ {r['sell_price']:,} silver")
+            lines.append(tr("Refined sell order: {city} @ {price} silver").format(
+                city=r['sell_city'], price=f"{r['sell_price']:,}"))
         else:
-            lines.append("Refined sell order: no live buy order to sell into")
+            lines.append(tr("Refined sell order: no live buy order to sell into"))
         lines.append("")
-        lines.append("Tip: the data is player-sourced — try Refresh, or check this item in-game.")
+        lines.append(tr("Tip: the data is player-sourced — try Refresh, or check this item in-game."))
         return "\n".join(lines)
 
 
@@ -352,7 +400,7 @@ class RefiningTab(QWidget):
 
         # Filters
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Tier:"))
+        filter_row.addWidget(TransLabel("Tier:"))
         self.tier_checks = {}
         for t in TIERS:
             cb = QCheckBox(f"T{t}")
@@ -362,7 +410,7 @@ class RefiningTab(QWidget):
             self.tier_checks[t] = cb
 
         filter_row.addSpacing(20)
-        filter_row.addWidget(QLabel("Enchant:"))
+        filter_row.addWidget(TransLabel("Enchant:"))
         self.enchant_checks = {}
         for e in ENCHANTS:
             cb = QCheckBox(f".{e}")
@@ -372,10 +420,10 @@ class RefiningTab(QWidget):
             self.enchant_checks[e] = cb
 
         filter_row.addSpacing(20)
-        filter_row.addWidget(QLabel("Material:"))
+        filter_row.addWidget(TransLabel("Material:"))
         self.mat_checks = {}
         for mat in RAW_TO_REFINED:
-            cb = QCheckBox(mat.title())
+            cb = QCheckBox(tr(mat.title()))
             cb.setChecked(_load_bool(f"ref/mat/{mat}", True))
             cb.stateChanged.connect(self._on_filter_changed)
             filter_row.addWidget(cb)
@@ -386,7 +434,7 @@ class RefiningTab(QWidget):
 
         # Cities
         city_row = QHBoxLayout()
-        city_row.addWidget(QLabel("Cities:"))
+        city_row.addWidget(TransLabel("Cities:"))
         self.city_checks = {}
         for city in CITIES:
             cb = QCheckBox(city)
@@ -399,12 +447,12 @@ class RefiningTab(QWidget):
 
         # Actions
         action_row = QHBoxLayout()
-        self.refresh_btn = QPushButton("Refresh prices")
+        self.refresh_btn = TransButton("Refresh prices")
         self.refresh_btn.clicked.connect(self._refresh)
         action_row.addWidget(self.refresh_btn)
 
         action_row.addSpacing(15)
-        action_row.addWidget(QLabel("Min margin:"))
+        action_row.addWidget(TransLabel("Min margin:"))
         self.min_margin = QSpinBox()
         self.min_margin.setRange(-999_999, 9_999_999)
         self.min_margin.setSingleStep(100)
@@ -413,7 +461,7 @@ class RefiningTab(QWidget):
         action_row.addWidget(self.min_margin)
 
         action_row.addSpacing(15)
-        self.auto_refresh = QCheckBox("Auto-refresh every")
+        self.auto_refresh = TransCheck("Auto-refresh every")
         self.auto_refresh.setChecked(_load_bool("ref/auto_refresh", False))
         self.auto_refresh.stateChanged.connect(self._on_auto_refresh_toggled)
         action_row.addWidget(self.auto_refresh)
@@ -424,16 +472,14 @@ class RefiningTab(QWidget):
         self.auto_interval.valueChanged.connect(self._on_auto_refresh_toggled)
         action_row.addWidget(self.auto_interval)
 
-        self.status = QLabel("Idle.")
+        self.status = QLabel(tr("Idle."))
         action_row.addWidget(self.status)
         action_row.addStretch()
         layout.addLayout(action_row)
 
         # Table
         self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels(
-            ["Item", "Buy in", "Buy price", "Refine in", "Sell in", "Sell price", "Net margin", "Data age"]
-        )
+        self._set_headers()
         self.table.setSortingEnabled(True)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -447,6 +493,19 @@ class RefiningTab(QWidget):
         self.timer.timeout.connect(self._refresh)
         self._on_auto_refresh_toggled()
         self._refresh()
+
+    def _set_headers(self):
+        self.table.setHorizontalHeaderLabels(
+            [tr("Item"), tr("Buy in"), tr("Buy price"), tr("Refine in"), tr("Sell in"),
+             tr("Sell price"), tr("Net margin"), tr("Data age")]
+        )
+
+    def retranslate(self):
+        retranslate_children(self)
+        self._set_headers()
+        for mat, cb in self.mat_checks.items():
+            cb.setText(tr(mat.title()))
+        self._apply_filters()
 
     def save_state(self):
         for t, cb in self.tier_checks.items():
@@ -475,13 +534,13 @@ class RefiningTab(QWidget):
     def _refresh(self):
         cities = [c for c, cb in self.city_checks.items() if cb.isChecked()]
         if not cities:
-            self.status.setText("Pick at least one city.")
+            self.status.setText(tr("Pick at least one city."))
             return
         if self._worker is not None and self._worker.isRunning():
             self._pending = True
             return
         self.refresh_btn.setEnabled(False)
-        self.status.setText(f"Fetching prices for {len(cities)} cities…")
+        self.status.setText(tr("Fetching prices for {n} cities…").format(n=len(cities)))
         worker = RefiningWorker(cities)
         worker.finished_ok.connect(self._on_results)
         worker.failed.connect(self._on_error)
@@ -492,12 +551,12 @@ class RefiningTab(QWidget):
     def _on_results(self, results: list[dict]):
         self.all_results = results
         ts = datetime.now().strftime("%H:%M:%S")
-        self.status.setText(f"Loaded {len(results)} pairs at {ts}.")
+        self.status.setText(tr("Loaded {n} pairs at {ts}.").format(n=len(results), ts=ts))
         self.refresh_btn.setEnabled(True)
         self._apply_filters()
 
     def _on_error(self, msg: str):
-        self.status.setText(f"Error: {msg}")
+        self.status.setText(tr("Error: {msg}").format(msg=msg))
         self.refresh_btn.setEnabled(True)
 
     def _on_worker_done(self):
@@ -538,18 +597,18 @@ class RefiningTab(QWidget):
         for row_i, r in enumerate(filtered):
             refine_text = r["refine_city"] or "—"
             if r["refine_city"] and r["refine_note"] == "no bonus":
-                refine_text += " (no bonus)"
+                refine_text += tr(" (no bonus)")
             age_text = f"{_age_or_dash(r['buy_age'])} / {_age_or_dash(r['sell_age'])}"
-            buy_ts = _abs_timestamp(r["buy_age"]) if r["buy_age"] is not None else "no data"
-            sell_ts = _abs_timestamp(r["sell_age"]) if r["sell_age"] is not None else "no data"
-            age_tooltip = f"Raw price: {buy_ts}\nRefined price: {sell_ts}"
+            buy_ts = _abs_timestamp(r["buy_age"]) if r["buy_age"] is not None else tr("no data")
+            sell_ts = _abs_timestamp(r["sell_age"]) if r["sell_age"] is not None else tr("no data")
+            age_tooltip = tr("Raw price: {buy}\nRefined price: {sell}").format(buy=buy_ts, sell=sell_ts)
 
             margin_item = NumericItem(_silver_or_dash(r["margin"]), r["margin"])
             if r["margin"] is None:
                 margin_item.setForeground(QColor("#888888"))
                 margin_item.setToolTip(
-                    "No margin — missing live price: "
-                    + ", ".join(r.get("missing") or ["unknown"])
+                    tr("No margin — missing live price: ")
+                    + ", ".join(r.get("missing") or [tr("unknown")])
                 )
             elif r["margin"] > 0:
                 margin_item.setForeground(QColor("#2e7d32"))
@@ -594,7 +653,7 @@ class BlackMarketTab(QWidget):
 
         layout = QVBoxLayout(self)
 
-        info = QLabel(
+        info = TransLabel(
             "Buy gear cheap in a royal city → sell into Black Market buy orders in Caerleon. "
             "Margins include the 4% BM sales tax."
         )
@@ -603,7 +662,7 @@ class BlackMarketTab(QWidget):
 
         # Filters
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Tier:"))
+        filter_row.addWidget(TransLabel("Tier:"))
         self.tier_checks = {}
         for t in BM_TIERS:
             cb = QCheckBox(f"T{t}")
@@ -613,7 +672,7 @@ class BlackMarketTab(QWidget):
             self.tier_checks[t] = cb
 
         filter_row.addSpacing(20)
-        filter_row.addWidget(QLabel("Enchant:"))
+        filter_row.addWidget(TransLabel("Enchant:"))
         self.enchant_checks = {}
         for e in BM_ENCHANTS:
             cb = QCheckBox(f".{e}")
@@ -623,10 +682,10 @@ class BlackMarketTab(QWidget):
             self.enchant_checks[e] = cb
 
         filter_row.addSpacing(20)
-        filter_row.addWidget(QLabel("Category:"))
+        filter_row.addWidget(TransLabel("Category:"))
         self.group_checks = {}
         for group in SLOT_GROUPS:
-            cb = QCheckBox(group)
+            cb = QCheckBox(tr(group))
             cb.setChecked(_load_bool(f"bm/group/{group}", True))
             cb.stateChanged.connect(self._on_filter_changed)
             filter_row.addWidget(cb)
@@ -637,7 +696,7 @@ class BlackMarketTab(QWidget):
 
         # Source cities (Caerleon excluded — BM is there, doesn't make sense as source)
         city_row = QHBoxLayout()
-        city_row.addWidget(QLabel("Source cities:"))
+        city_row.addWidget(TransLabel("Source cities:"))
         self.city_checks = {}
         for city in CITIES:
             if city == "Caerleon":
@@ -652,12 +711,12 @@ class BlackMarketTab(QWidget):
 
         # Actions
         action_row = QHBoxLayout()
-        self.refresh_btn = QPushButton("Refresh prices")
+        self.refresh_btn = TransButton("Refresh prices")
         self.refresh_btn.clicked.connect(self._refresh)
         action_row.addWidget(self.refresh_btn)
 
         action_row.addSpacing(15)
-        action_row.addWidget(QLabel("Min margin:"))
+        action_row.addWidget(TransLabel("Min margin:"))
         self.min_margin = QSpinBox()
         self.min_margin.setRange(0, 99_999_999)
         self.min_margin.setSingleStep(10_000)
@@ -666,7 +725,7 @@ class BlackMarketTab(QWidget):
         action_row.addWidget(self.min_margin)
 
         action_row.addSpacing(15)
-        self.auto_refresh = QCheckBox("Auto-refresh every")
+        self.auto_refresh = TransCheck("Auto-refresh every")
         self.auto_refresh.setChecked(_load_bool("bm/auto_refresh", False))
         self.auto_refresh.stateChanged.connect(self._on_auto_refresh_toggled)
         action_row.addWidget(self.auto_refresh)
@@ -677,16 +736,14 @@ class BlackMarketTab(QWidget):
         self.auto_interval.valueChanged.connect(self._on_auto_refresh_toggled)
         action_row.addWidget(self.auto_interval)
 
-        self.status = QLabel("Idle.")
+        self.status = QLabel(tr("Idle."))
         action_row.addWidget(self.status)
         action_row.addStretch()
         layout.addLayout(action_row)
 
         # Table
         self.table = QTableWidget(0, 9)
-        self.table.setHorizontalHeaderLabels(
-            ["Item", "Quality", "Buy in", "Buy price", "BM price", "Net (after 4% tax)", "Margin", "Vol/day", "Data age"]
-        )
+        self._set_headers()
         self.table.setSortingEnabled(True)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -699,6 +756,19 @@ class BlackMarketTab(QWidget):
         self.timer.timeout.connect(self._refresh)
         self._on_auto_refresh_toggled()
         self._refresh()
+
+    def _set_headers(self):
+        self.table.setHorizontalHeaderLabels(
+            [tr("Item"), tr("Quality"), tr("Buy in"), tr("Buy price"), tr("BM price"),
+             tr("Net (after 4% tax)"), tr("Margin"), tr("Vol/day"), tr("Data age")]
+        )
+
+    def retranslate(self):
+        retranslate_children(self)
+        self._set_headers()
+        for group, cb in self.group_checks.items():
+            cb.setText(tr(group))
+        self._apply_filters()
 
     def save_state(self):
         for t, cb in self.tier_checks.items():
@@ -739,12 +809,12 @@ class BlackMarketTab(QWidget):
     def _refresh(self):
         cities = [c for c, cb in self.city_checks.items() if cb.isChecked()]
         if not cities:
-            self.status.setText("Pick at least one source city.")
+            self.status.setText(tr("Pick at least one source city."))
             return
         tiers = [t for t, cb in self.tier_checks.items() if cb.isChecked()]
         enchants = [e for e, cb in self.enchant_checks.items() if cb.isChecked()]
         if not tiers or not enchants:
-            self.status.setText("Pick at least one tier and enchant.")
+            self.status.setText(tr("Pick at least one tier and enchant."))
             return
         # A scan is already in flight — don't spawn an overlapping QThread (that
         # would destroy the running one and crash the app). Queue one more pass.
@@ -753,7 +823,8 @@ class BlackMarketTab(QWidget):
             return
         self.refresh_btn.setEnabled(False)
         self.status.setText(
-            f"Scanning tiers {tiers} enchants {enchants} across {len(cities)} cities + Black Market…"
+            tr("Scanning tiers {tiers} enchants {enchants} across {n} cities + Black Market…").format(
+                tiers=tiers, enchants=enchants, n=len(cities))
         )
         # Always fetch every profitable flip (min_margin=0). The user's Min margin
         # is applied client-side in _apply_filters, so changing it never rescans.
@@ -771,7 +842,7 @@ class BlackMarketTab(QWidget):
         self._apply_filters()
 
     def _on_error(self, msg: str):
-        self.status.setText(f"Error: {msg}")
+        self.status.setText(tr("Error: {msg}").format(msg=msg))
         self.refresh_btn.setEnabled(True)
 
     def _on_worker_done(self):
@@ -791,18 +862,17 @@ class BlackMarketTab(QWidget):
         ]
         self._filtered_rows = filtered
         self.status.setText(
-            f"Showing {len(filtered)} of {len(self.all_results)} flips "
-            f"(margin ≥ {_fmt_silver(min_margin)}) — scanned {self._last_scan_ts}."
+            tr("Showing {shown} of {total} flips (margin ≥ {margin}) — scanned {ts}.").format(
+                shown=len(filtered), total=len(self.all_results),
+                margin=_fmt_silver(min_margin), ts=self._last_scan_ts)
         )
 
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(filtered))
         for row_i, r in enumerate(filtered):
             age_text = f"{_fmt_age(r['buy_age'])} / {_fmt_age(r['bm_age'])}"
-            age_tooltip = (
-                f"City price: {_abs_timestamp(r['buy_age'])}\n"
-                f"BM price: {_abs_timestamp(r['bm_age'])}"
-            )
+            age_tooltip = tr("City price: {city}\nBM price: {bm}").format(
+                city=_abs_timestamp(r['buy_age']), bm=_abs_timestamp(r['bm_age']))
             label = f"T{r['tier']}.{r['enchant']} {r['name']}"
             quality_text = QUALITIES.get(r["quality"], str(r["quality"]))
             vol = r.get("daily_volume")  # None = not fetched (outside top-N by margin)
@@ -819,8 +889,8 @@ class BlackMarketTab(QWidget):
             if vol is None:
                 vol_item.setForeground(QColor("#888888"))
                 vol_item.setToolTip(
-                    "Volume only fetched for the top flips by margin — "
-                    "raise Min margin or check this item in-game"
+                    tr("Volume only fetched for the top flips by margin — "
+                       "raise Min margin or check this item in-game")
                 )
             else:
                 if vol >= 20:
@@ -829,7 +899,7 @@ class BlackMarketTab(QWidget):
                     vol_item.setForeground(QColor("#b08800"))
                 else:
                     vol_item.setForeground(QColor("#c62828"))
-                vol_item.setToolTip("Avg units sold to BM per day (last 7 days)")
+                vol_item.setToolTip(tr("Avg units sold to BM per day (last 7 days)"))
 
             age_item = QTableWidgetItem(age_text)
             age_item.setToolTip(age_tooltip)
@@ -870,7 +940,7 @@ class ResourceHaulTab(QWidget):
 
         layout = QVBoxLayout(self)
 
-        info = QLabel(
+        info = TransLabel(
             "Buy a resource at its cheapest city → haul it → list your own sell order "
             "in the priciest city. Margin = destination price × (1 − 6.5% tax/fee) − buy price."
         )
@@ -879,7 +949,7 @@ class ResourceHaulTab(QWidget):
 
         # Filters (all client-side)
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Tier:"))
+        filter_row.addWidget(TransLabel("Tier:"))
         self.tier_checks = {}
         for t in TIERS:
             cb = QCheckBox(f"T{t}")
@@ -889,7 +959,7 @@ class ResourceHaulTab(QWidget):
             self.tier_checks[t] = cb
 
         filter_row.addSpacing(20)
-        filter_row.addWidget(QLabel("Enchant:"))
+        filter_row.addWidget(TransLabel("Enchant:"))
         self.enchant_checks = {}
         for e in RESOURCE_ENCHANTS:
             cb = QCheckBox(f".{e}")
@@ -899,20 +969,20 @@ class ResourceHaulTab(QWidget):
             self.enchant_checks[e] = cb
 
         filter_row.addSpacing(20)
-        filter_row.addWidget(QLabel("Type:"))
+        filter_row.addWidget(TransLabel("Type:"))
         self.kind_checks = {}
         for k in self.KINDS:
-            cb = QCheckBox(k)
+            cb = QCheckBox(tr(k))
             cb.setChecked(_load_bool(f"haul/kind/{k}", True))
             cb.stateChanged.connect(self._on_filter_changed)
             filter_row.addWidget(cb)
             self.kind_checks[k] = cb
 
         filter_row.addSpacing(20)
-        filter_row.addWidget(QLabel("Material:"))
+        filter_row.addWidget(TransLabel("Material:"))
         self.mat_checks = {}
         for mat in RAW_TO_REFINED:
-            cb = QCheckBox(mat.title())
+            cb = QCheckBox(tr(mat.title()))
             cb.setChecked(_load_bool(f"haul/mat/{mat}", True))
             cb.stateChanged.connect(self._on_filter_changed)
             filter_row.addWidget(cb)
@@ -923,7 +993,7 @@ class ResourceHaulTab(QWidget):
 
         # Cities (drive the fetch — changing these rescans)
         city_row = QHBoxLayout()
-        city_row.addWidget(QLabel("Cities:"))
+        city_row.addWidget(TransLabel("Cities:"))
         self.city_checks = {}
         for city in CITIES:
             cb = QCheckBox(city)
@@ -936,12 +1006,12 @@ class ResourceHaulTab(QWidget):
 
         # Actions
         action_row = QHBoxLayout()
-        self.refresh_btn = QPushButton("Refresh prices")
+        self.refresh_btn = TransButton("Refresh prices")
         self.refresh_btn.clicked.connect(self._refresh)
         action_row.addWidget(self.refresh_btn)
 
         action_row.addSpacing(15)
-        action_row.addWidget(QLabel("Min margin:"))
+        action_row.addWidget(TransLabel("Min margin:"))
         self.min_margin = QSpinBox()
         self.min_margin.setRange(-999_999, 9_999_999)
         self.min_margin.setSingleStep(50)
@@ -950,7 +1020,7 @@ class ResourceHaulTab(QWidget):
         action_row.addWidget(self.min_margin)
 
         action_row.addSpacing(15)
-        self.auto_refresh = QCheckBox("Auto-refresh every")
+        self.auto_refresh = TransCheck("Auto-refresh every")
         self.auto_refresh.setChecked(_load_bool("haul/auto_refresh", False))
         self.auto_refresh.stateChanged.connect(self._on_auto_refresh_toggled)
         action_row.addWidget(self.auto_refresh)
@@ -961,28 +1031,14 @@ class ResourceHaulTab(QWidget):
         self.auto_interval.valueChanged.connect(self._on_auto_refresh_toggled)
         action_row.addWidget(self.auto_interval)
 
-        self.status = QLabel("Idle.")
+        self.status = QLabel(tr("Idle."))
         action_row.addWidget(self.status)
         action_row.addStretch()
         layout.addLayout(action_row)
 
         # Table
         self.table = QTableWidget(0, 11)
-        self.table.setHorizontalHeaderLabels(
-            [
-                "Item",
-                "Type",
-                "Buy in",
-                "Buy price",
-                "Sell in",
-                "Sell price",
-                "Net (after 6.5%)",
-                "Margin",
-                "ROI",
-                "Vol/day",
-                "Data age",
-            ]
-        )
+        self._set_headers()
         self.table.setSortingEnabled(True)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -995,6 +1051,32 @@ class ResourceHaulTab(QWidget):
         self.timer.timeout.connect(self._refresh)
         self._on_auto_refresh_toggled()
         self._refresh()
+
+    def _set_headers(self):
+        self.table.setHorizontalHeaderLabels(
+            [
+                tr("Item"),
+                tr("Type"),
+                tr("Buy in"),
+                tr("Buy price"),
+                tr("Sell in"),
+                tr("Sell price"),
+                tr("Net (after 6.5%)"),
+                tr("Margin"),
+                tr("ROI"),
+                tr("Vol/day"),
+                tr("Data age"),
+            ]
+        )
+
+    def retranslate(self):
+        retranslate_children(self)
+        self._set_headers()
+        for k, cb in self.kind_checks.items():
+            cb.setText(tr(k))
+        for mat, cb in self.mat_checks.items():
+            cb.setText(tr(mat.title()))
+        self._apply_filters()
 
     def save_state(self):
         for t, cb in self.tier_checks.items():
@@ -1031,13 +1113,13 @@ class ResourceHaulTab(QWidget):
     def _refresh(self):
         cities = [c for c, cb in self.city_checks.items() if cb.isChecked()]
         if len(cities) < 2:
-            self.status.setText("Pick at least two cities (a haul needs a source and a destination).")
+            self.status.setText(tr("Pick at least two cities (a haul needs a source and a destination)."))
             return
         if self._worker is not None and self._worker.isRunning():
             self._pending = True
             return
         self.refresh_btn.setEnabled(False)
-        self.status.setText(f"Fetching resource prices across {len(cities)} cities…")
+        self.status.setText(tr("Fetching resource prices across {n} cities…").format(n=len(cities)))
         worker = ResourceHaulWorker(cities)
         worker.finished_ok.connect(self._on_results)
         worker.failed.connect(self._on_error)
@@ -1052,7 +1134,7 @@ class ResourceHaulTab(QWidget):
         self._apply_filters()
 
     def _on_error(self, msg: str):
-        self.status.setText(f"Error: {msg}")
+        self.status.setText(tr("Error: {msg}").format(msg=msg))
         self.refresh_btn.setEnabled(True)
 
     def _on_worker_done(self):
@@ -1079,18 +1161,17 @@ class ResourceHaulTab(QWidget):
         ]
         self._filtered_rows = filtered
         self.status.setText(
-            f"Showing {len(filtered)} of {len(self.all_results)} hauls "
-            f"(margin ≥ {_fmt_silver(min_margin)}) — scanned {self._last_scan_ts}."
+            tr("Showing {shown} of {total} hauls (margin ≥ {margin}) — scanned {ts}.").format(
+                shown=len(filtered), total=len(self.all_results),
+                margin=_fmt_silver(min_margin), ts=self._last_scan_ts)
         )
 
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(filtered))
         for row_i, r in enumerate(filtered):
             age_text = f"{_fmt_age(r['buy_age'])} / {_fmt_age(r['sell_age'])}"
-            age_tooltip = (
-                f"Buy price: {_abs_timestamp(r['buy_age'])}\n"
-                f"Sell price: {_abs_timestamp(r['sell_age'])}"
-            )
+            age_tooltip = tr("Buy price: {buy}\nSell price: {sell}").format(
+                buy=_abs_timestamp(r['buy_age']), sell=_abs_timestamp(r['sell_age']))
             roi_pct = r["roi"] * 100
             vol = r.get("daily_volume")  # None = not fetched (outside top-N by margin)
             vol_text = "—" if vol is None else str(vol)
@@ -1106,8 +1187,8 @@ class ResourceHaulTab(QWidget):
             if vol is None:
                 vol_item.setForeground(QColor("#888888"))
                 vol_item.setToolTip(
-                    "Volume only fetched for the top hauls by margin — "
-                    "raise Min margin or check this item in-game"
+                    tr("Volume only fetched for the top hauls by margin — "
+                       "raise Min margin or check this item in-game")
                 )
             else:
                 if vol >= 20:
@@ -1117,14 +1198,14 @@ class ResourceHaulTab(QWidget):
                 else:
                     vol_item.setForeground(QColor("#c62828"))
                 vol_item.setToolTip(
-                    f"Avg units sold per day in {r['sell_city']} (last 7 days)"
+                    tr("Avg units sold per day in {city} (last 7 days)").format(city=r['sell_city'])
                 )
 
             age_item = QTableWidgetItem(age_text)
             age_item.setToolTip(age_tooltip)
 
             self.table.setItem(row_i, 0, QTableWidgetItem(r["label"]))
-            self.table.setItem(row_i, 1, QTableWidgetItem(r["kind"]))
+            self.table.setItem(row_i, 1, QTableWidgetItem(tr(r["kind"])))
             self.table.setItem(row_i, 2, QTableWidgetItem(r["buy_city"]))
             self.table.setItem(row_i, 3, NumericItem(_fmt_silver(r["buy_price"]), r["buy_price"]))
             self.table.setItem(row_i, 4, QTableWidgetItem(r["sell_city"]))
@@ -1154,68 +1235,77 @@ class GatherDetailDialog(QDialog):
 
     @staticmethod
     def _build_text(r: dict) -> str:
-        lines = [f"=== {r['label']} (gathered) ===", ""]
-        lines.append(f"Recommended: {r['best_action']} — {r['best_value']:,} silver per gathered unit")
-        lines.append("(Net of 6.5% sell-order tax/fee. Raws are free; refine path buys the lesser material.)")
+        lines = [tr("=== {label} (gathered) ===").format(label=r['label']), ""]
+        lines.append(tr("Recommended: {action} — {v} silver per gathered unit").format(
+            action=tr(r['best_action']), v=f"{r['best_value']:,}"))
+        lines.append(tr("(Net of 6.5% sell-order tax/fee. Raws are free; refine path buys the lesser material.)"))
         lines.append("")
 
-        lines.append("--- Option A: Sell raw ---")
+        lines.append(tr("--- Option A: Sell raw ---"))
         if r["raw_value"] is not None:
             lines.append(
-                f"List raw in {r['raw_sell_city']} @ {r['raw_sell_price']:,}  ->  "
-                f"x0.935 = {int(round(r['raw_value'])):,} /unit"
+                tr("List raw in {city} @ {price}  ->  x0.935 = {v} /unit").format(
+                    city=r['raw_sell_city'], price=f"{r['raw_sell_price']:,}",
+                    v=f"{int(round(r['raw_value'])):,}")
             )
         else:
-            lines.append("No live raw sell price.")
+            lines.append(tr("No live raw sell price."))
         lines.append("")
 
-        lines.append("--- Option B: Refine -> sell ---")
+        lines.append(tr("--- Option B: Refine -> sell ---"))
         if r["refine_value"] is not None:
             rr = r["return_rate"]
             eff_raws = r["raws_per"] * (1 - rr)
             eff_prev = r["prev_per"] * (1 - rr)
             where = (
-                f"{r['refine_city']} (bonus, {rr * 100:.1f}% return)"
+                tr("{city} (bonus, {pct}% return)").format(
+                    city=r['refine_city'], pct=f"{rr * 100:.1f}")
                 if r["refine_city"]
-                else f"any royal city ({rr * 100:.1f}% return)"
+                else tr("any royal city ({pct}% return)").format(pct=f"{rr * 100:.1f}")
             )
-            lines.append(f"Refine in {where}")
-            recipe = f"{r['raws_per']} raws (gathered)"
+            lines.append(tr("Refine in {where}").format(where=where))
+            recipe = tr("{raws} raws (gathered)").format(raws=r['raws_per'])
             if r["prev_per"] > 0:
                 recipe += f" + {r['prev_per']} T{r['tier'] - 1} {r['refined_name']}"
-            lines.append(f"Recipe per refined unit: {recipe}")
+            lines.append(tr("Recipe per refined unit: {recipe}").format(recipe=recipe))
             if r["prev_per"] > 0:
                 if r["prev_buy_price"]:
                     lines.append(
-                        f"Buy T{r['tier'] - 1} {r['refined_name']} in {r['prev_buy_city']} @ "
-                        f"{r['prev_buy_price']:,}  (effective {eff_prev:.2f}/refined after return)"
+                        tr("Buy T{tier} {name} in {city} @ {price}  (effective {eff}/refined after return)").format(
+                            tier=r['tier'] - 1, name=r['refined_name'], city=r['prev_buy_city'],
+                            price=f"{r['prev_buy_price']:,}", eff=f"{eff_prev:.2f}")
                     )
                 else:
-                    lines.append(f"T{r['tier'] - 1} {r['refined_name']}: no live price")
+                    lines.append(tr("T{tier} {name}: no live price").format(
+                        tier=r['tier'] - 1, name=r['refined_name']))
             refined_net = r["refine_sell_price"] * (1 - 0.065)
             lines.append(
-                f"Sell refined in {r['refine_sell_city']} @ {r['refine_sell_price']:,}  ->  "
-                f"x0.935 = {int(round(refined_net)):,}"
+                tr("Sell refined in {city} @ {price}  ->  x0.935 = {v}").format(
+                    city=r['refine_sell_city'], price=f"{r['refine_sell_price']:,}",
+                    v=f"{int(round(refined_net)):,}")
             )
             prev_cost = eff_prev * (r["prev_buy_price"] or 0)
             lines.append(
-                f"Net per refined unit = {int(round(refined_net)):,} - "
-                f"{int(round(prev_cost)):,} input = {int(round(refined_net - prev_cost)):,}"
+                tr("Net per refined unit = {net} - {cost} input = {result}").format(
+                    net=f"{int(round(refined_net)):,}", cost=f"{int(round(prev_cost)):,}",
+                    result=f"{int(round(refined_net - prev_cost)):,}")
             )
             lines.append(
-                f"Per gathered raw unit (/ {eff_raws:.2f} raws) = "
-                f"{int(round(r['refine_value'])):,} /unit"
+                tr("Per gathered raw unit (/ {raws} raws) = {v} /unit").format(
+                    raws=f"{eff_raws:.2f}", v=f"{int(round(r['refine_value'])):,}")
             )
         else:
-            lines.append("Refine path unavailable (missing refined or lesser-material price).")
+            lines.append(tr("Refine path unavailable (missing refined or lesser-material price)."))
         lines.append("")
 
-        lines.append("--- Data freshness ---")
+        lines.append(tr("--- Data freshness ---"))
         if r["raw_age"] is not None:
-            lines.append(f"Raw price: {_fmt_age(r['raw_age'])} old ({_abs_timestamp(r['raw_age'])})")
+            lines.append(tr("Raw price: {age} old ({ts})").format(
+                age=_fmt_age(r['raw_age']), ts=_abs_timestamp(r['raw_age'])))
         if r["refine_age"] is not None:
             lines.append(
-                f"Refined price: {_fmt_age(r['refine_age'])} old ({_abs_timestamp(r['refine_age'])})"
+                tr("Refined price: {age} old ({ts})").format(
+                    age=_fmt_age(r['refine_age']), ts=_abs_timestamp(r['refine_age']))
             )
         return "\n".join(lines)
 
@@ -1236,7 +1326,7 @@ class GatherTab(QWidget):
 
         layout = QVBoxLayout(self)
 
-        info = QLabel(
+        info = TransLabel(
             "You gather the raws for free — this ranks each resource by net silver per "
             "gathered unit, picking the better of selling it raw or refining it and selling "
             "the bar/cloth/etc. The refine path buys the lesser material at market and includes "
@@ -1247,7 +1337,7 @@ class GatherTab(QWidget):
 
         # Filters (all client-side)
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Tier:"))
+        filter_row.addWidget(TransLabel("Tier:"))
         self.tier_checks = {}
         for t in TIERS:
             cb = QCheckBox(f"T{t}")
@@ -1257,7 +1347,7 @@ class GatherTab(QWidget):
             self.tier_checks[t] = cb
 
         filter_row.addSpacing(20)
-        filter_row.addWidget(QLabel("Enchant:"))
+        filter_row.addWidget(TransLabel("Enchant:"))
         self.enchant_checks = {}
         for e in ENCHANTS:
             cb = QCheckBox(f".{e}")
@@ -1267,10 +1357,10 @@ class GatherTab(QWidget):
             self.enchant_checks[e] = cb
 
         filter_row.addSpacing(20)
-        filter_row.addWidget(QLabel("Material:"))
+        filter_row.addWidget(TransLabel("Material:"))
         self.mat_checks = {}
         for mat in RAW_TO_REFINED:
-            cb = QCheckBox(mat.title())
+            cb = QCheckBox(tr(mat.title()))
             cb.setChecked(_load_bool(f"gather/mat/{mat}", True))
             cb.stateChanged.connect(self._on_filter_changed)
             filter_row.addWidget(cb)
@@ -1281,7 +1371,7 @@ class GatherTab(QWidget):
 
         # Cities (drive the fetch)
         city_row = QHBoxLayout()
-        city_row.addWidget(QLabel("Cities:"))
+        city_row.addWidget(TransLabel("Cities:"))
         self.city_checks = {}
         for city in CITIES:
             cb = QCheckBox(city)
@@ -1294,12 +1384,12 @@ class GatherTab(QWidget):
 
         # Actions
         action_row = QHBoxLayout()
-        self.refresh_btn = QPushButton("Refresh prices")
+        self.refresh_btn = TransButton("Refresh prices")
         self.refresh_btn.clicked.connect(self._refresh)
         action_row.addWidget(self.refresh_btn)
 
         action_row.addSpacing(15)
-        action_row.addWidget(QLabel("Min silver/unit:"))
+        action_row.addWidget(TransLabel("Min silver/unit:"))
         self.min_value = QSpinBox()
         self.min_value.setRange(0, 9_999_999)
         self.min_value.setSingleStep(100)
@@ -1308,7 +1398,7 @@ class GatherTab(QWidget):
         action_row.addWidget(self.min_value)
 
         action_row.addSpacing(15)
-        self.auto_refresh = QCheckBox("Auto-refresh every")
+        self.auto_refresh = TransCheck("Auto-refresh every")
         self.auto_refresh.setChecked(_load_bool("gather/auto_refresh", False))
         self.auto_refresh.stateChanged.connect(self._on_auto_refresh_toggled)
         action_row.addWidget(self.auto_refresh)
@@ -1319,26 +1409,14 @@ class GatherTab(QWidget):
         self.auto_interval.valueChanged.connect(self._on_auto_refresh_toggled)
         action_row.addWidget(self.auto_interval)
 
-        self.status = QLabel("Idle.")
+        self.status = QLabel(tr("Idle."))
         action_row.addWidget(self.status)
         action_row.addStretch()
         layout.addLayout(action_row)
 
         # Table
         self.table = QTableWidget(0, 9)
-        self.table.setHorizontalHeaderLabels(
-            [
-                "Item",
-                "Best action",
-                "Net silver/unit",
-                "Sell raw /unit",
-                "Refine /unit",
-                "Sell in",
-                "Inputs to buy",
-                "Vol/day",
-                "Data age",
-            ]
-        )
+        self._set_headers()
         self.table.setSortingEnabled(True)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1352,6 +1430,28 @@ class GatherTab(QWidget):
         self.timer.timeout.connect(self._refresh)
         self._on_auto_refresh_toggled()
         self._refresh()
+
+    def _set_headers(self):
+        self.table.setHorizontalHeaderLabels(
+            [
+                tr("Item"),
+                tr("Best action"),
+                tr("Net silver/unit"),
+                tr("Sell raw /unit"),
+                tr("Refine /unit"),
+                tr("Sell in"),
+                tr("Inputs to buy"),
+                tr("Vol/day"),
+                tr("Data age"),
+            ]
+        )
+
+    def retranslate(self):
+        retranslate_children(self)
+        self._set_headers()
+        for mat, cb in self.mat_checks.items():
+            cb.setText(tr(mat.title()))
+        self._apply_filters()
 
     def save_state(self):
         for t, cb in self.tier_checks.items():
@@ -1384,13 +1484,13 @@ class GatherTab(QWidget):
     def _refresh(self):
         cities = [c for c, cb in self.city_checks.items() if cb.isChecked()]
         if not cities:
-            self.status.setText("Pick at least one city.")
+            self.status.setText(tr("Pick at least one city."))
             return
         if self._worker is not None and self._worker.isRunning():
             self._pending = True
             return
         self.refresh_btn.setEnabled(False)
-        self.status.setText(f"Scanning gather options across {len(cities)} cities…")
+        self.status.setText(tr("Scanning gather options across {n} cities…").format(n=len(cities)))
         worker = GatherWorker(cities)
         worker.finished_ok.connect(self._on_results)
         worker.failed.connect(self._on_error)
@@ -1405,7 +1505,7 @@ class GatherTab(QWidget):
         self._apply_filters()
 
     def _on_error(self, msg: str):
-        self.status.setText(f"Error: {msg}")
+        self.status.setText(tr("Error: {msg}").format(msg=msg))
         self.refresh_btn.setEnabled(True)
 
     def _on_worker_done(self):
@@ -1430,8 +1530,9 @@ class GatherTab(QWidget):
         ]
         self._filtered_rows = filtered
         self.status.setText(
-            f"Showing {len(filtered)} of {len(self.all_results)} resources "
-            f"(≥ {_fmt_silver(min_value)}/unit) — scanned {self._last_scan_ts}."
+            tr("Showing {shown} of {total} resources (≥ {v}/unit) — scanned {ts}.").format(
+                shown=len(filtered), total=len(self.all_results),
+                v=_fmt_silver(min_value), ts=self._last_scan_ts)
         )
 
         def _silver_or_dash(v):
@@ -1444,7 +1545,7 @@ class GatherTab(QWidget):
             if r["best"] == "refine" and r["prev_per"] > 0 and r["prev_buy_city"]:
                 inputs = f"{r['prev_per']}× T{r['tier'] - 1} {r['refined_name']} @ {_fmt_silver(r['prev_buy_price'])}"
             elif r["best"] == "refine":
-                inputs = "none"
+                inputs = tr("none")
             else:
                 inputs = "—"
             age = r["raw_age"] if r["best"] == "raw" else r["refine_age"]
@@ -1460,8 +1561,8 @@ class GatherTab(QWidget):
             if vol is None:
                 vol_item.setForeground(QColor("#888888"))
                 vol_item.setToolTip(
-                    "Volume only fetched for the top options — "
-                    "raise Min silver/unit or check this item in-game"
+                    tr("Volume only fetched for the top options — "
+                       "raise Min silver/unit or check this item in-game")
                 )
             else:
                 if vol >= 20:
@@ -1471,11 +1572,11 @@ class GatherTab(QWidget):
                 else:
                     vol_item.setForeground(QColor("#c62828"))
                 vol_item.setToolTip(
-                    f"Avg units of the listed item sold per day in {sell_city} (last 7 days)"
+                    tr("Avg units of the listed item sold per day in {city} (last 7 days)").format(city=sell_city)
                 )
 
             self.table.setItem(row_i, 0, QTableWidgetItem(r["label"]))
-            self.table.setItem(row_i, 1, QTableWidgetItem(r["best_action"]))
+            self.table.setItem(row_i, 1, QTableWidgetItem(tr(r["best_action"])))
             self.table.setItem(row_i, 2, best_item)
             self.table.setItem(row_i, 3, NumericItem(_silver_or_dash(r["raw_value"]), r["raw_value"]))
             self.table.setItem(row_i, 4, NumericItem(_silver_or_dash(r["refine_value"]), r["refine_value"]))
@@ -1510,14 +1611,14 @@ class BundleCheckDialog(QDialog):
         super().__init__(parent)
         self.cities = cities
         self._worker = None
-        self.setWindowTitle("Check a bundle / trade")
+        self.setWindowTitle(tr("Check a bundle / trade"))
         self.resize(900, 640)
 
         layout = QVBoxLayout(self)
         intro = QLabel(
-            "Search the items someone is offering you, add them to the list, and check "
-            f"them against their real traded value. Uses your selected cities: "
-            f"{', '.join(cities)}."
+            tr("Search the items someone is offering you, add them to the list, and check "
+               "them against their real traded value. Uses your selected cities: {cities}.").format(
+                cities=', '.join(cities))
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -1527,7 +1628,7 @@ class BundleCheckDialog(QDialog):
 
         left = QVBoxLayout()
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Type an item name, e.g. Rotcaller, Royal Cowl…")
+        self.search_box.setPlaceholderText(tr("Type an item name, e.g. Rotcaller, Royal Cowl…"))
         self.search_box.textChanged.connect(self._on_search)
         left.addWidget(self.search_box)
         self.results_list = QListWidget()
@@ -1537,17 +1638,17 @@ class BundleCheckDialog(QDialog):
 
         mid = QVBoxLayout()
         mid.addStretch()
-        add_btn = QPushButton("Add →")
+        add_btn = QPushButton(tr("Add →"))
         add_btn.clicked.connect(lambda: self._add_item(self.results_list.currentItem()))
         mid.addWidget(add_btn)
-        rm_btn = QPushButton("← Remove")
+        rm_btn = QPushButton(tr("← Remove"))
         rm_btn.clicked.connect(self._remove_item)
         mid.addWidget(rm_btn)
         mid.addStretch()
         picker.addLayout(mid)
 
         right = QVBoxLayout()
-        right.addWidget(QLabel("Items to check:"))
+        right.addWidget(QLabel(tr("Items to check:")))
         self.bundle_list = QListWidget()
         self.bundle_list.itemDoubleClicked.connect(lambda _: self._remove_item())
         right.addWidget(self.bundle_list)
@@ -1556,13 +1657,13 @@ class BundleCheckDialog(QDialog):
         layout.addLayout(picker)
 
         action_row = QHBoxLayout()
-        self.check_btn = QPushButton("Check bundle")
+        self.check_btn = QPushButton(tr("Check bundle"))
         self.check_btn.clicked.connect(self._check)
         action_row.addWidget(self.check_btn)
-        clear_btn = QPushButton("Clear list")
+        clear_btn = QPushButton(tr("Clear list"))
         clear_btn.clicked.connect(self.bundle_list.clear)
         action_row.addWidget(clear_btn)
-        self.status = QLabel("Add items, then Check bundle.")
+        self.status = QLabel(tr("Add items, then Check bundle."))
         action_row.addWidget(self.status)
         action_row.addStretch()
         layout.addLayout(action_row)
@@ -1570,16 +1671,16 @@ class BundleCheckDialog(QDialog):
         self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels(
             [
-                "Item",
-                "Tier",
-                "Quality",
-                "City",
-                "Listed price",
-                "Fair value",
-                "Spike ×",
-                "Vol/day",
-                "Verdict",
-                "Age",
+                tr("Item"),
+                tr("Tier"),
+                tr("Quality"),
+                tr("City"),
+                tr("Listed price"),
+                tr("Fair value"),
+                tr("Spike ×"),
+                tr("Vol/day"),
+                tr("Verdict"),
+                tr("Age"),
             ]
         )
         self.table.setSortingEnabled(True)
@@ -1621,12 +1722,12 @@ class BundleCheckDialog(QDialog):
             for i in range(self.bundle_list.count())
         ]
         if not ids:
-            self.status.setText("Add at least one item first.")
+            self.status.setText(tr("Add at least one item first."))
             return
         if self._worker is not None and self._worker.isRunning():
             return
         self.check_btn.setEnabled(False)
-        self.status.setText(f"Checking {len(ids)} item(s)…")
+        self.status.setText(tr("Checking {n} item(s)…").format(n=len(ids)))
         worker = BundleCheckWorker(ids, self.cities)
         worker.finished_ok.connect(self._on_results)
         worker.failed.connect(self._on_error)
@@ -1635,7 +1736,7 @@ class BundleCheckDialog(QDialog):
         worker.start()
 
     def _on_error(self, msg):
-        self.status.setText(f"Error: {msg}")
+        self.status.setText(tr("Error: {msg}").format(msg=msg))
         self.check_btn.setEnabled(True)
 
     def _on_worker_done(self):
@@ -1644,9 +1745,9 @@ class BundleCheckDialog(QDialog):
     def _on_results(self, results):
         self.check_btn.setEnabled(True)
         self.status.setText(
-            f"{len(results)} listing(s) found. Most suspicious first."
+            tr("{n} listing(s) found. Most suspicious first.").format(n=len(results))
             if results
-            else "No live listings found for those items in the selected cities."
+            else tr("No live listings found for those items in the selected cities.")
         )
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(results))
@@ -1717,7 +1818,7 @@ class ScamTab(QWidget):
 
         layout = QVBoxLayout(self)
 
-        info = QLabel(
+        info = TransLabel(
             "Scans the market for items listed FAR above their real recent traded price — "
             "the planted/overpriced listings used in bundle & trade scams. Spike × = current "
             "listing ÷ fair value (volume-weighted 30-day traded average). A high spike on a "
@@ -1728,7 +1829,7 @@ class ScamTab(QWidget):
 
         # Fetch-driving filters: tier + enchant (gear universe).
         gear_row = QHBoxLayout()
-        gear_row.addWidget(QLabel("Tier:"))
+        gear_row.addWidget(TransLabel("Tier:"))
         self.tier_checks = {}
         for t in BM_TIERS:
             cb = QCheckBox(f"T{t}")
@@ -1738,7 +1839,7 @@ class ScamTab(QWidget):
             self.tier_checks[t] = cb
 
         gear_row.addSpacing(20)
-        gear_row.addWidget(QLabel("Enchant:"))
+        gear_row.addWidget(TransLabel("Enchant:"))
         self.enchant_checks = {}
         for e in BM_ENCHANTS:
             cb = QCheckBox(f".{e}")
@@ -1748,10 +1849,10 @@ class ScamTab(QWidget):
             self.enchant_checks[e] = cb
 
         gear_row.addSpacing(20)
-        gear_row.addWidget(QLabel("Slot:"))
+        gear_row.addWidget(TransLabel("Slot:"))
         self.group_checks = {}
         for g in SLOT_GROUPS:
-            cb = QCheckBox(g)
+            cb = QCheckBox(tr(g))
             cb.setChecked(_load_bool(f"scam/group/{g}", True))
             cb.stateChanged.connect(self._on_filter_changed)
             gear_row.addWidget(cb)
@@ -1761,7 +1862,7 @@ class ScamTab(QWidget):
 
         # Cities (drive the fetch).
         city_row = QHBoxLayout()
-        city_row.addWidget(QLabel("Cities:"))
+        city_row.addWidget(TransLabel("Cities:"))
         self.city_checks = {}
         for city in CITIES:
             cb = QCheckBox(city)
@@ -1774,19 +1875,19 @@ class ScamTab(QWidget):
 
         # Actions + client-side thresholds.
         action_row = QHBoxLayout()
-        self.refresh_btn = QPushButton("Scan market")
+        self.refresh_btn = TransButton("Scan market")
         self.refresh_btn.clicked.connect(self._refresh)
         action_row.addWidget(self.refresh_btn)
 
-        self.bundle_btn = QPushButton("Check a bundle…")
+        self.bundle_btn = TransButton("Check a bundle…")
         self.bundle_btn.setToolTip(
-            "Verify the specific items in a trade someone is offering you, item by item."
+            tr("Verify the specific items in a trade someone is offering you, item by item.")
         )
         self.bundle_btn.clicked.connect(self._open_bundle_check)
         action_row.addWidget(self.bundle_btn)
 
         action_row.addSpacing(15)
-        action_row.addWidget(QLabel("Min spike ×:"))
+        action_row.addWidget(TransLabel("Min spike ×:"))
         self.min_spike = QDoubleSpinBox()
         self.min_spike.setRange(1.0, 1000.0)
         self.min_spike.setSingleStep(0.5)
@@ -1796,7 +1897,7 @@ class ScamTab(QWidget):
         action_row.addWidget(self.min_spike)
 
         action_row.addSpacing(10)
-        action_row.addWidget(QLabel("Min inflation:"))
+        action_row.addWidget(TransLabel("Min inflation:"))
         self.min_inflation = QSpinBox()
         self.min_inflation.setRange(0, 999_999_999)
         self.min_inflation.setSingleStep(5_000)
@@ -1805,40 +1906,27 @@ class ScamTab(QWidget):
         self.min_inflation.valueChanged.connect(self._on_filter_changed)
 
         action_row.addSpacing(10)
-        action_row.addWidget(QLabel("Max vol/day:"))
+        action_row.addWidget(TransLabel("Max vol/day:"))
         self.max_vol = QSpinBox()
         self.max_vol.setRange(0, 999_999)
         self.max_vol.setSingleStep(5)
         self.max_vol.setValue(int(settings.value("scam/max_vol", 0)))
-        self.max_vol.setSpecialValueText("any")  # 0 = no volume cap
+        self.max_vol.setSpecialValueText(tr("any"))  # 0 = no volume cap
         self.max_vol.setToolTip(
-            "Only show items trading at or below this many units/day.\n"
-            "Fake prices live in thin markets — set e.g. 5 to focus on them. 'any' = no cap."
+            tr("Only show items trading at or below this many units/day.\n"
+               "Fake prices live in thin markets — set e.g. 5 to focus on them. 'any' = no cap.")
         )
         self.max_vol.valueChanged.connect(self._on_filter_changed)
         action_row.addWidget(self.max_vol)
 
-        self.status = QLabel("Idle.")
+        self.status = QLabel(tr("Idle."))
         action_row.addSpacing(10)
         action_row.addWidget(self.status)
         action_row.addStretch()
         layout.addLayout(action_row)
 
         self.table = QTableWidget(0, 10)
-        self.table.setHorizontalHeaderLabels(
-            [
-                "Item",
-                "Tier",
-                "Quality",
-                "City",
-                "Listed price",
-                "Fair value",
-                "Inflation",
-                "Spike ×",
-                "Vol/day",
-                "Data age",
-            ]
-        )
+        self._set_headers()
         self.table.setSortingEnabled(True)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1848,6 +1936,37 @@ class ScamTab(QWidget):
         layout.addWidget(self.table)
 
         self._refresh()
+
+    def _set_headers(self):
+        self.table.setHorizontalHeaderLabels(
+            [
+                tr("Item"),
+                tr("Tier"),
+                tr("Quality"),
+                tr("City"),
+                tr("Listed price"),
+                tr("Fair value"),
+                tr("Inflation"),
+                tr("Spike ×"),
+                tr("Vol/day"),
+                tr("Data age"),
+            ]
+        )
+
+    def retranslate(self):
+        retranslate_children(self)
+        self._set_headers()
+        for g, cb in self.group_checks.items():
+            cb.setText(tr(g))
+        self.bundle_btn.setToolTip(
+            tr("Verify the specific items in a trade someone is offering you, item by item.")
+        )
+        self.max_vol.setSpecialValueText(tr("any"))
+        self.max_vol.setToolTip(
+            tr("Only show items trading at or below this many units/day.\n"
+               "Fake prices live in thin markets — set e.g. 5 to focus on them. 'any' = no cap.")
+        )
+        self._apply_filters()
 
     def save_state(self):
         for t, cb in self.tier_checks.items():
@@ -1865,7 +1984,7 @@ class ScamTab(QWidget):
     def _open_bundle_check(self):
         cities = [c for c, cb in self.city_checks.items() if cb.isChecked()]
         if not cities:
-            self.status.setText("Pick at least one city first (bundle check uses them).")
+            self.status.setText(tr("Pick at least one city first (bundle check uses them)."))
             return
         dlg = BundleCheckDialog(cities, parent=self)
         dlg.exec()
@@ -1885,13 +2004,14 @@ class ScamTab(QWidget):
         tiers = [t for t, cb in self.tier_checks.items() if cb.isChecked()]
         enchants = [e for e, cb in self.enchant_checks.items() if cb.isChecked()]
         if not cities or not tiers or not enchants:
-            self.status.setText("Pick at least one city, tier and enchant.")
+            self.status.setText(tr("Pick at least one city, tier and enchant."))
             return
         if self._worker is not None and self._worker.isRunning():
             self._pending = True
             return
         self.refresh_btn.setEnabled(False)
-        self.status.setText(f"Scanning {len(tiers)} tier(s) across {len(cities)} cities…")
+        self.status.setText(tr("Scanning {tn} tier(s) across {cn} cities…").format(
+            tn=len(tiers), cn=len(cities)))
         worker = ScamWorker(cities, tiers, enchants)
         worker.finished_ok.connect(self._on_results)
         worker.failed.connect(self._on_error)
@@ -1906,7 +2026,7 @@ class ScamTab(QWidget):
         self._apply_filters()
 
     def _on_error(self, msg: str):
-        self.status.setText(f"Error: {msg}")
+        self.status.setText(tr("Error: {msg}").format(msg=msg))
         self.refresh_btn.setEnabled(True)
 
     def _on_worker_done(self):
@@ -1931,8 +2051,9 @@ class ScamTab(QWidget):
         ]
         self._filtered_rows = filtered
         self.status.setText(
-            f"Showing {len(filtered)} of {len(self.all_results)} flagged listings "
-            f"(spike ≥ {min_spike:.1f}×) — scanned {self._last_scan_ts}."
+            tr("Showing {shown} of {total} flagged listings (spike ≥ {spike}×) — scanned {ts}.").format(
+                shown=len(filtered), total=len(self.all_results),
+                spike=f"{min_spike:.1f}", ts=self._last_scan_ts)
         )
 
         self.table.setSortingEnabled(False)
@@ -1948,8 +2069,10 @@ class ScamTab(QWidget):
             else:
                 spike_item.setForeground(QColor("#b08800"))  # amber
             spike_item.setToolTip(
-                f"Listed at {_fmt_silver(r['current'])}, but the 30-day traded "
-                f"average is {_fmt_silver(r['baseline'])} — {spike:.1f}× over fair value."
+                tr("Listed at {current}, but the 30-day traded average is {baseline} — "
+                   "{spike}× over fair value.").format(
+                    current=_fmt_silver(r['current']), baseline=_fmt_silver(r['baseline']),
+                    spike=f"{spike:.1f}")
             )
 
             vol = r["vol_per_day"]
@@ -1958,20 +2081,20 @@ class ScamTab(QWidget):
             if vol < 5:
                 vol_item.setForeground(QColor("#c62828"))
                 vol_item.setToolTip(
-                    "Very thin market — a fake price here can sit unchallenged. "
-                    "Strong corroboration that this listing is bogus."
+                    tr("Very thin market — a fake price here can sit unchallenged. "
+                       "Strong corroboration that this listing is bogus.")
                 )
             elif vol < 20:
                 vol_item.setForeground(QColor("#b08800"))
             else:
                 vol_item.setForeground(QColor("#2e7d32"))
                 vol_item.setToolTip(
-                    "Actively traded — a real (if temporary) price spike is more "
-                    "plausible here than in a thin market."
+                    tr("Actively traded — a real (if temporary) price spike is more "
+                       "plausible here than in a thin market.")
                 )
 
             age_item = QTableWidgetItem(_fmt_age(r["age"]))
-            age_item.setToolTip(f"Listing seen: {_abs_timestamp(r['age'])}")
+            age_item.setToolTip(tr("Listing seen: {ts}").format(ts=_abs_timestamp(r['age'])))
 
             name_item = QTableWidgetItem(r["name"])
             name_item.setToolTip(r["id"])
@@ -1993,7 +2116,7 @@ class ScamTab(QWidget):
 class CraftDetailDialog(QDialog):
     def __init__(self, parent, row: dict):
         super().__init__(parent)
-        self.setWindowTitle(f"{row['name']} — craft breakdown")
+        self.setWindowTitle(tr("{name} — craft breakdown").format(name=row['name']))
         self.resize(620, 480)
         layout = QVBoxLayout(self)
         text = QTextEdit()
@@ -2006,43 +2129,48 @@ class CraftDetailDialog(QDialog):
         rr = r["return_rate"]
         lines = [f"=== {r['name']}  (T{r['tier']}.{r['enchant']}) ===", ""]
         if r["no_recipe"]:
-            lines.append("No known crafting recipe for this item.")
+            lines.append(tr("No known crafting recipe for this item."))
             return "\n".join(lines)
-        lines.append(f"Resource return rate: {rr * 100:.1f}%  (refunds returnable materials)")
+        lines.append(tr("Resource return rate: {pct}%  (refunds returnable materials)").format(
+            pct=f"{rr * 100:.1f}"))
         lines.append("")
-        lines.append("--- Materials (bought instant at cheapest selected city) ---")
+        lines.append(tr("--- Materials (bought instant at cheapest selected city) ---"))
         for m in r["materials"]:
-            ret_note = "" if m["ret"] else "  [artifact/token — never refunded]"
+            ret_note = "" if m["ret"] else tr("  [artifact/token — never refunded]")
             if m["unit_price"] is None:
-                lines.append(f"{m['count']}x {m['name']}: no live price{ret_note}")
+                lines.append(tr("{count}x {name}: no live price{ret_note}").format(
+                    count=m['count'], name=m['name'], ret_note=ret_note))
             else:
                 lines.append(
-                    f"{m['count']}x {m['name']} @ {m['unit_price']:,} in {m['city']}"
-                    f"  ->  effective {m['eff_count']:.2f} x {m['unit_price']:,} = "
-                    f"{int(round(m['cost'])):,}{ret_note}"
+                    tr("{count}x {name} @ {price} in {city}  ->  effective {eff} x {price} = {cost}{ret_note}").format(
+                        count=m['count'], name=m['name'], price=f"{m['unit_price']:,}", city=m['city'],
+                        eff=f"{m['eff_count']:.2f}", cost=f"{int(round(m['cost'])):,}", ret_note=ret_note)
                 )
         lines.append("")
         cc = r["craft_cost"]
-        lines.append(f"Total craft cost: {('—' if cc is None else format(int(round(cc)), ','))}")
+        lines.append(tr("Total craft cost: {v}").format(
+            v=('—' if cc is None else format(int(round(cc)), ','))))
         lines.append("")
-        lines.append("--- Sell ---")
+        lines.append(tr("--- Sell ---"))
         if r["net_sell"] is None:
-            lines.append("No live sell price (no city listing and no Black Market buy order).")
+            lines.append(tr("No live sell price (no city listing and no Black Market buy order)."))
         else:
-            tax = "4% BM tax" if r["sell_venue"] == "Black Market" else "6.5% sell-order tax/fee"
+            tax = tr("4% BM tax") if r["sell_venue"] == "Black Market" else tr("6.5% sell-order tax/fee")
             lines.append(
-                f"Best: {r['sell_venue']} @ {r['sell_price']:,}  ->  net {int(round(r['net_sell'])):,} "
-                f"(after {tax})"
+                tr("Best: {venue} @ {price}  ->  net {net} (after {tax})").format(
+                    venue=tr(r['sell_venue']), price=f"{r['sell_price']:,}",
+                    net=f"{int(round(r['net_sell'])):,}", tax=tax)
             )
         lines.append("")
         if r["profit"] is not None:
-            lines.append(f"PROFIT per craft: {int(round(r['profit'])):,}")
+            lines.append(tr("PROFIT per craft: {v}").format(v=f"{int(round(r['profit'])):,}"))
             if r["roi"] is not None:
-                lines.append(f"ROI on materials: {r['roi'] * 100:.1f}%")
+                lines.append(tr("ROI on materials: {pct}%").format(pct=f"{r['roi'] * 100:.1f}"))
         else:
-            lines.append(f"Profit unavailable — missing: {', '.join(r['missing'])}")
+            lines.append(tr("Profit unavailable — missing: {missing}").format(
+                missing=', '.join(r['missing'])))
         lines.append("")
-        lines.append("Note: assumes Normal quality and ignores station usage fees.")
+        lines.append(tr("Note: assumes Normal quality and ignores station usage fees."))
         return "\n".join(lines)
 
 
@@ -2061,7 +2189,7 @@ class CraftTab(QWidget):
         self.results: list[dict] = []
 
         layout = QVBoxLayout(self)
-        info = QLabel(
+        info = TransLabel(
             "Search any craftable item, add it to the list, and check the net profit of "
             "crafting it. Materials are bought instant at the cheapest selected city; the "
             "crafted item is sold the better of a city listing (net 6.5%) or the Black Market "
@@ -2072,23 +2200,25 @@ class CraftTab(QWidget):
 
         # Crafting bonus toggles -> return rate.
         opt_row = QHBoxLayout()
-        self.spec_cb = QCheckBox("Crafting bonus city (+15)")
+        self.spec_cb = TransCheck("Crafting bonus city (+15)")
         self.spec_cb.setChecked(_load_bool("craft/spec", False))
-        self.spec_cb.setToolTip("Crafting in the city that specializes in this item type.")
+        self.spec_cb.setToolTip(tr("Crafting in the city that specializes in this item type."))
         self.spec_cb.stateChanged.connect(self._on_rate_changed)
         opt_row.addWidget(self.spec_cb)
 
-        self.focus_cb = QCheckBox("Use focus (+59)")
+        self.focus_cb = TransCheck("Use focus (+59)")
         self.focus_cb.setChecked(_load_bool("craft/focus", False))
         self.focus_cb.stateChanged.connect(self._on_rate_changed)
         opt_row.addWidget(self.focus_cb)
 
         opt_row.addSpacing(10)
-        opt_row.addWidget(QLabel("Bonus day:"))
+        opt_row.addWidget(TransLabel("Bonus day:"))
         self.bonus_combo = QComboBox()
         for label in CRAFT_BONUS_DAY:
-            self.bonus_combo.addItem(label)
-        self.bonus_combo.setCurrentText(settings.value("craft/bonus_day", "None"))
+            self.bonus_combo.addItem(tr(label), label)  # display translated, value English
+        saved_bonus = settings.value("craft/bonus_day", "None")
+        idx = self.bonus_combo.findData(saved_bonus)
+        self.bonus_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.bonus_combo.currentTextChanged.connect(self._on_rate_changed)
         opt_row.addWidget(self.bonus_combo)
 
@@ -2101,7 +2231,7 @@ class CraftTab(QWidget):
 
         # Cities (drive the fetch: where materials are bought / item listed).
         city_row = QHBoxLayout()
-        city_row.addWidget(QLabel("Cities:"))
+        city_row.addWidget(TransLabel("Cities:"))
         self.city_checks = {}
         for city in CITIES:
             cb = QCheckBox(city)
@@ -2115,7 +2245,7 @@ class CraftTab(QWidget):
         picker = QHBoxLayout()
         left = QVBoxLayout()
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Type an item name, e.g. Broadsword, Mercenary Jacket…")
+        self.search_box.setPlaceholderText(tr("Type an item name, e.g. Broadsword, Mercenary Jacket…"))
         self.search_box.textChanged.connect(self._on_search)
         left.addWidget(self.search_box)
         self.results_list = QListWidget()
@@ -2125,17 +2255,17 @@ class CraftTab(QWidget):
 
         mid = QVBoxLayout()
         mid.addStretch()
-        add_btn = QPushButton("Add →")
+        add_btn = TransButton("Add →")
         add_btn.clicked.connect(lambda: self._add_item(self.results_list.currentItem()))
         mid.addWidget(add_btn)
-        rm_btn = QPushButton("← Remove")
+        rm_btn = TransButton("← Remove")
         rm_btn.clicked.connect(self._remove_item)
         mid.addWidget(rm_btn)
         mid.addStretch()
         picker.addLayout(mid)
 
         right = QVBoxLayout()
-        right.addWidget(QLabel("Items to craft-check:"))
+        right.addWidget(TransLabel("Items to craft-check:"))
         self.craft_list = QListWidget()
         self.craft_list.itemDoubleClicked.connect(lambda _: self._remove_item())
         right.addWidget(self.craft_list)
@@ -2143,21 +2273,19 @@ class CraftTab(QWidget):
         layout.addLayout(picker)
 
         action_row = QHBoxLayout()
-        self.check_btn = QPushButton("Check craft profit")
+        self.check_btn = TransButton("Check craft profit")
         self.check_btn.clicked.connect(self._check)
         action_row.addWidget(self.check_btn)
-        clear_btn = QPushButton("Clear list")
+        clear_btn = TransButton("Clear list")
         clear_btn.clicked.connect(self.craft_list.clear)
         action_row.addWidget(clear_btn)
-        self.status = QLabel("Add items, then check.")
+        self.status = QLabel(tr("Add items, then check."))
         action_row.addWidget(self.status)
         action_row.addStretch()
         layout.addLayout(action_row)
 
         self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels(
-            ["Item", "Tier", "Craft cost", "Sell (net)", "Venue", "Profit", "ROI %", "Notes"]
-        )
+        self._set_headers()
         self.table.setSortingEnabled(True)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -2173,20 +2301,36 @@ class CraftTab(QWidget):
         return craft_return_rate(
             spec=self.spec_cb.isChecked(),
             focus=self.focus_cb.isChecked(),
-            bonus_day=CRAFT_BONUS_DAY[self.bonus_combo.currentText()],
+            bonus_day=CRAFT_BONUS_DAY[self.bonus_combo.currentData()],
         )
 
     def _update_rate_label(self):
-        self.rate_label.setText(f"Return rate: {self._return_rate() * 100:.1f}%")
+        self.rate_label.setText(tr("Return rate: {pct}%").format(pct=f"{self._return_rate() * 100:.1f}"))
 
     def _on_rate_changed(self):
         self._update_rate_label()
         self.save_state()
 
+    def _set_headers(self):
+        self.table.setHorizontalHeaderLabels(
+            [tr("Item"), tr("Tier"), tr("Craft cost"), tr("Sell (net)"), tr("Venue"),
+             tr("Profit"), tr("ROI %"), tr("Notes")]
+        )
+
+    def retranslate(self):
+        retranslate_children(self)
+        self._set_headers()
+        self.spec_cb.setToolTip(tr("Crafting in the city that specializes in this item type."))
+        for i in range(self.bonus_combo.count()):
+            self.bonus_combo.setItemText(i, tr(self.bonus_combo.itemData(i)))
+        self.search_box.setPlaceholderText(tr("Type an item name, e.g. Broadsword, Mercenary Jacket…"))
+        self._update_rate_label()
+        self._on_results(self.results)
+
     def save_state(self):
         settings.setValue("craft/spec", self.spec_cb.isChecked())
         settings.setValue("craft/focus", self.focus_cb.isChecked())
-        settings.setValue("craft/bonus_day", self.bonus_combo.currentText())
+        settings.setValue("craft/bonus_day", self.bonus_combo.currentData())
         for c, cb in self.city_checks.items():
             settings.setValue(f"craft/city/{c}", cb.isChecked())
 
@@ -2221,17 +2365,17 @@ class CraftTab(QWidget):
             for i in range(self.craft_list.count())
         ]
         if not ids:
-            self.status.setText("Add at least one item first.")
+            self.status.setText(tr("Add at least one item first."))
             return
         cities = [c for c, cb in self.city_checks.items() if cb.isChecked()]
         if not cities:
-            self.status.setText("Pick at least one city.")
+            self.status.setText(tr("Pick at least one city."))
             return
         if self._worker is not None and self._worker.isRunning():
             return
         self.save_state()
         self.check_btn.setEnabled(False)
-        self.status.setText(f"Checking {len(ids)} item(s)…")
+        self.status.setText(tr("Checking {n} item(s)…").format(n=len(ids)))
         worker = CraftWorker(ids, cities, self._return_rate())
         worker.finished_ok.connect(self._on_results)
         worker.failed.connect(self._on_error)
@@ -2240,7 +2384,7 @@ class CraftTab(QWidget):
         worker.start()
 
     def _on_error(self, msg):
-        self.status.setText(f"Error: {msg}")
+        self.status.setText(tr("Error: {msg}").format(msg=msg))
         self.check_btn.setEnabled(True)
 
     def _on_worker_done(self):
@@ -2255,9 +2399,9 @@ class CraftTab(QWidget):
         self.check_btn.setEnabled(True)
         self.results = results
         self.status.setText(
-            f"{len(results)} item(s). Double-click a row for the material breakdown."
+            tr("{n} item(s). Double-click a row for the material breakdown.").format(n=len(results))
             if results
-            else "No results."
+            else tr("No results.")
         )
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(results))
@@ -2273,9 +2417,9 @@ class CraftTab(QWidget):
                 roi_item.setForeground(QColor("#2e7d32") if roi > 0 else QColor("#b71c1c"))
 
             if r["no_recipe"]:
-                note = "no recipe"
+                note = tr("no recipe")
             elif r["missing"]:
-                note = "missing: " + ", ".join(r["missing"])
+                note = tr("missing: ") + ", ".join(r["missing"])
             else:
                 note = ""
 
@@ -2286,7 +2430,7 @@ class CraftTab(QWidget):
             self.table.setItem(row_i, 1, QTableWidgetItem(tier_label))
             self.table.setItem(row_i, 2, NumericItem(_silver_or_dash(r["craft_cost"]), r["craft_cost"]))
             self.table.setItem(row_i, 3, NumericItem(_silver_or_dash(r["net_sell"]), r["net_sell"]))
-            self.table.setItem(row_i, 4, QTableWidgetItem(r["sell_venue"] or "—"))
+            self.table.setItem(row_i, 4, QTableWidgetItem(tr(r["sell_venue"]) if r["sell_venue"] else "—"))
             self.table.setItem(row_i, 5, profit_item)
             self.table.setItem(row_i, 6, roi_item)
             self.table.setItem(row_i, 7, QTableWidgetItem(note))
