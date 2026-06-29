@@ -1,9 +1,13 @@
-"""Item ID → English name lookup from the ao-bin-dumps items.txt."""
+"""Item ID → name lookup from the ao-bin-dumps dumps (English + Spanish)."""
+import json
 import os
 import re
 import sys
 
+import i18n
+
 _NAMES: dict[str, str] | None = None
+_NAMES_ES: dict[str, str] | None = None
 _GEAR_IDS: list[str] | None = None
 
 # Lines look like:  967: T4_ORE                                : Iron Ore
@@ -17,16 +21,16 @@ _GEAR_EXCLUDE = ("TOOL", "SEED", "FARM", "JOURNAL")
 _ID_RE = re.compile(r"^T([4-8])_([A-Z0-9_]+?)(?:@([0-4]))?$")
 
 
-def _items_path() -> str:
-    """Find items_raw.txt — works in dev and after PyInstaller --onefile bundle."""
+def _bundled_path(filename: str) -> str:
+    """Find a bundled data file — works in dev and after a PyInstaller bundle."""
     candidates = []
     if hasattr(sys, "_MEIPASS"):
-        candidates.append(os.path.join(sys._MEIPASS, "items_raw.txt"))
-    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "items_raw.txt"))
+        candidates.append(os.path.join(sys._MEIPASS, filename))
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), filename))
     for p in candidates:
         if os.path.exists(p):
             return p
-    raise FileNotFoundError("items_raw.txt not found; bundle it with the app")
+    raise FileNotFoundError(f"{filename} not found; bundle it with the app")
 
 
 def _load():
@@ -34,7 +38,7 @@ def _load():
     if _NAMES is not None:
         return
     names: dict[str, str] = {}
-    with open(_items_path(), "r", encoding="utf-8") as f:
+    with open(_bundled_path("items_raw.txt"), "r", encoding="utf-8") as f:
         for line in f:
             m = _LINE_RE.match(line)
             if m:
@@ -55,8 +59,26 @@ def _load():
     _GEAR_IDS = gear
 
 
+def _load_es():
+    """Lazily load the Spanish name map (bundled names_es.json)."""
+    global _NAMES_ES
+    if _NAMES_ES is not None:
+        return
+    try:
+        with open(_bundled_path("names_es.json"), "r", encoding="utf-8") as f:
+            _NAMES_ES = json.load(f)
+    except FileNotFoundError:
+        _NAMES_ES = {}
+
+
 def get_name(item_id: str) -> str:
+    """Localized item name for the current language, falling back to English."""
     _load()
+    if i18n.get_lang() == "es":
+        _load_es()
+        es = _NAMES_ES.get(item_id)
+        if es:
+            return es
     return _NAMES.get(item_id, item_id)
 
 
@@ -66,21 +88,27 @@ def gear_ids() -> list[str]:
 
 
 def search_ids(query: str, limit: int = 60) -> list[str]:
-    """Gear ids whose English name (or id) contains `query`, case-insensitive.
+    """Gear ids whose name (or id) contains `query`, case-insensitive.
 
-    Sorted by name, then tier, then enchant so a search like 'rotcaller' lists
-    each tier/enchant variant in a predictable order for the bundle picker.
+    Matches the localized display name, the English name, AND the id, so a
+    Spanish user can search in Spanish while English/id searches still work.
+    Sorted by the display name, then tier, then enchant so each tier/enchant
+    variant lists in a predictable order for the picker.
     """
     _load()
+    es_mode = i18n.get_lang() == "es"
+    if es_mode:
+        _load_es()
     q = query.strip().lower()
     if not q:
         return []
     matches = []
     for iid in _GEAR_IDS:
-        name = _NAMES.get(iid, iid)
-        if q in name.lower() or q in iid.lower():
+        english = _NAMES.get(iid, iid)
+        display = _NAMES_ES.get(iid, english) if es_mode else english
+        if q in display.lower() or q in english.lower() or q in iid.lower():
             meta = parse_id(iid)
-            matches.append((name, meta["tier"] if meta else 0,
+            matches.append((display, meta["tier"] if meta else 0,
                             meta["enchant"] if meta else 0, iid))
     matches.sort(key=lambda t: (t[0], t[1], t[2]))
     return [t[3] for t in matches[:limit]]

@@ -10,8 +10,9 @@ build/
 dist/
 *.manifest
 
-# Dev-only: raw ao-bin-dumps download used to regenerate recipes.json
+# Dev-only: raw ao-bin-dumps downloads used to regenerate recipes.json / names_es.json
 items_full.json
+localization_full.json
 
 # OS / editor
 .DS_Store
