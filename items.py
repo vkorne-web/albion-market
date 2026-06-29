@@ -1,6 +1,6 @@
 RAW_TO_REFINED = {
     "ORE": "METALBAR",
-    "WOOD": "PLANK",
+    "WOOD": "PLANKS",
     "FIBER": "CLOTH",
     "HIDE": "LEATHER",
     "ROCK": "STONEBLOCK",
@@ -70,7 +70,7 @@ RESOURCE_DISPLAY = {
     "HIDE": "Hide",
     "ROCK": "Rock",
     "METALBAR": "Metal Bar",
-    "PLANK": "Plank",
+    "PLANKS": "Plank",
     "CLOTH": "Cloth",
     "LEATHER": "Leather",
     "STONEBLOCK": "Stone Block",
@@ -81,6 +81,31 @@ RESOURCE_ENCHANTS = [0, 1, 2, 3]
 
 # Listing your own sell order: 4% sales tax + 2.5% setup fee (premium account).
 SELL_ORDER_TAX = 0.065
+
+
+# ---------- Crafting ----------
+
+# Resource Return Rate (RRR) stacks bonus POINTS, then RRR = 1 - 100/(100+sum).
+# Verified June 2026 against community guides:
+#   base only (18)        -> 15.2%
+#   +specialty (33)       -> 24.8%
+#   +focus (77)           -> 43.5%
+#   specialty+focus (92)  -> 47.9%
+CRAFT_BASE_BONUS = 18  # any royal-city crafting station, always present
+CRAFT_SPEC_BONUS = 15  # crafting in the item's specialty (bonus) city
+CRAFT_FOCUS_BONUS = 59  # using focus
+CRAFT_BONUS_DAY = {"None": 0, "Silver (+10)": 10, "Gold (+20)": 20}
+
+
+def craft_return_rate(spec: bool = False, focus: bool = False, bonus_day: int = 0) -> float:
+    """Fraction of (returnable) materials refunded when crafting."""
+    pts = CRAFT_BASE_BONUS
+    if spec:
+        pts += CRAFT_SPEC_BONUS
+    if focus:
+        pts += CRAFT_FOCUS_BONUS
+    pts += bonus_day
+    return 1 - 100 / (100 + pts)
 
 
 def build_resource_items():

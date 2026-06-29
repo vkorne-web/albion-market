@@ -6,10 +6,15 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QSpinBox,
@@ -25,14 +30,25 @@ from items import (
     BM_ENCHANTS,
     BM_TIERS,
     CITIES,
+    CRAFT_BONUS_DAY,
     ENCHANTS,
     QUALITIES,
     RAW_TO_REFINED,
     RESOURCE_ENCHANTS,
     SLOT_GROUPS,
     TIERS,
+    craft_return_rate,
 )
-from scanner import scan, scan_black_market, scan_gather, scan_resource_haul
+from scanner import (
+    check_items,
+    scan,
+    scan_black_market,
+    scan_craft,
+    scan_gather,
+    scan_manipulation,
+    scan_resource_haul,
+)
+import names
 
 ORG = "AlbionMarket"
 APP = "AlbionMarket"
@@ -41,6 +57,11 @@ settings = QSettings(ORG, APP)
 
 def _fmt_silver(n: int) -> str:
     return f"{n:,}"
+
+
+def _silver_or_dash(v) -> str:
+    """Format a silver amount (rounding floats), or an em dash for None."""
+    return f"{int(round(v)):,}" if v is not None else "—"
 
 
 def _fmt_age(seconds: float) -> str:
@@ -156,6 +177,66 @@ class GatherWorker(QThread):
     def run(self):
         try:
             self.finished_ok.emit(asyncio.run(scan_gather(cities=self.cities)))
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class ScamWorker(QThread):
+    finished_ok = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, cities, tiers, enchants):
+        super().__init__()
+        self.cities = cities
+        self.tiers = tiers
+        self.enchants = enchants
+
+    def run(self):
+        try:
+            self.finished_ok.emit(
+                asyncio.run(
+                    scan_manipulation(
+                        cities=self.cities, tiers=self.tiers, enchants=self.enchants
+                    )
+                )
+            )
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class BundleCheckWorker(QThread):
+    finished_ok = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, item_ids, cities):
+        super().__init__()
+        self.item_ids = item_ids
+        self.cities = cities
+
+    def run(self):
+        try:
+            self.finished_ok.emit(
+                asyncio.run(check_items(self.item_ids, cities=self.cities))
+            )
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class CraftWorker(QThread):
+    finished_ok = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, item_ids, cities, return_rate):
+        super().__init__()
+        self.item_ids = item_ids
+        self.cities = cities
+        self.return_rate = return_rate
+
+    def run(self):
+        try:
+            self.finished_ok.emit(
+                asyncio.run(scan_craft(self.item_ids, self.cities, self.return_rate))
+            )
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -1413,6 +1494,801 @@ class GatherTab(QWidget):
 # ---------- Main window ----------
 
 
+class BundleCheckDialog(QDialog):
+    """Verify the specific items in a bundle/trade someone is offering you.
+
+    Search items by name, build a list, and get a per-item verdict (listed price
+    vs real traded value) so a planted overpriced item in the bundle stands out.
+    """
+
+    def __init__(self, cities, parent=None):
+        super().__init__(parent)
+        self.cities = cities
+        self._worker = None
+        self.setWindowTitle("Check a bundle / trade")
+        self.resize(900, 640)
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Search the items someone is offering you, add them to the list, and check "
+            f"them against their real traded value. Uses your selected cities: "
+            f"{', '.join(cities)}."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        # Search (left) + bundle list (right).
+        picker = QHBoxLayout()
+
+        left = QVBoxLayout()
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Type an item name, e.g. Rotcaller, Royal Cowl…")
+        self.search_box.textChanged.connect(self._on_search)
+        left.addWidget(self.search_box)
+        self.results_list = QListWidget()
+        self.results_list.itemDoubleClicked.connect(self._add_item)
+        left.addWidget(self.results_list)
+        picker.addLayout(left)
+
+        mid = QVBoxLayout()
+        mid.addStretch()
+        add_btn = QPushButton("Add →")
+        add_btn.clicked.connect(lambda: self._add_item(self.results_list.currentItem()))
+        mid.addWidget(add_btn)
+        rm_btn = QPushButton("← Remove")
+        rm_btn.clicked.connect(self._remove_item)
+        mid.addWidget(rm_btn)
+        mid.addStretch()
+        picker.addLayout(mid)
+
+        right = QVBoxLayout()
+        right.addWidget(QLabel("Items to check:"))
+        self.bundle_list = QListWidget()
+        self.bundle_list.itemDoubleClicked.connect(lambda _: self._remove_item())
+        right.addWidget(self.bundle_list)
+        picker.addLayout(right)
+
+        layout.addLayout(picker)
+
+        action_row = QHBoxLayout()
+        self.check_btn = QPushButton("Check bundle")
+        self.check_btn.clicked.connect(self._check)
+        action_row.addWidget(self.check_btn)
+        clear_btn = QPushButton("Clear list")
+        clear_btn.clicked.connect(self.bundle_list.clear)
+        action_row.addWidget(clear_btn)
+        self.status = QLabel("Add items, then Check bundle.")
+        action_row.addWidget(self.status)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+
+        self.table = QTableWidget(0, 10)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Item",
+                "Tier",
+                "Quality",
+                "City",
+                "Listed price",
+                "Fair value",
+                "Spike ×",
+                "Vol/day",
+                "Verdict",
+                "Age",
+            ]
+        )
+        self.table.setSortingEnabled(True)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+    def _on_search(self, text):
+        self.results_list.clear()
+        for iid in names.search_ids(text):
+            meta = names.parse_id(iid)
+            label = f"{names.get_name(iid)}  (T{meta['tier']}.{meta['enchant']})"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, iid)
+            self.results_list.addItem(item)
+
+    def _add_item(self, item):
+        if item is None:
+            return
+        iid = item.data(Qt.UserRole)
+        # Skip if already in the bundle.
+        for i in range(self.bundle_list.count()):
+            if self.bundle_list.item(i).data(Qt.UserRole) == iid:
+                return
+        new = QListWidgetItem(item.text())
+        new.setData(Qt.UserRole, iid)
+        self.bundle_list.addItem(new)
+
+    def _remove_item(self):
+        row = self.bundle_list.currentRow()
+        if row >= 0:
+            self.bundle_list.takeItem(row)
+
+    def _check(self):
+        ids = [
+            self.bundle_list.item(i).data(Qt.UserRole)
+            for i in range(self.bundle_list.count())
+        ]
+        if not ids:
+            self.status.setText("Add at least one item first.")
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.check_btn.setEnabled(False)
+        self.status.setText(f"Checking {len(ids)} item(s)…")
+        worker = BundleCheckWorker(ids, self.cities)
+        worker.finished_ok.connect(self._on_results)
+        worker.failed.connect(self._on_error)
+        worker.finished.connect(self._on_worker_done)
+        self._worker = worker
+        worker.start()
+
+    def _on_error(self, msg):
+        self.status.setText(f"Error: {msg}")
+        self.check_btn.setEnabled(True)
+
+    def _on_worker_done(self):
+        self._worker = None
+
+    def _on_results(self, results):
+        self.check_btn.setEnabled(True)
+        self.status.setText(
+            f"{len(results)} listing(s) found. Most suspicious first."
+            if results
+            else "No live listings found for those items in the selected cities."
+        )
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(results))
+        for row_i, r in enumerate(results):
+            tier_label = f"T{r['tier']}.{r['enchant']}" if r["tier"] else "—"
+            spike = r["spike"]
+            spike_text = "—" if spike is None else f"{spike:.1f}×"
+            spike_item = NumericItem(spike_text, spike)
+            if spike is not None:
+                if spike >= 5:
+                    spike_item.setForeground(QColor("#b71c1c"))
+                elif spike >= 3:
+                    spike_item.setForeground(QColor("#c62828"))
+                elif spike >= 1.5:
+                    spike_item.setForeground(QColor("#b08800"))
+                else:
+                    spike_item.setForeground(QColor("#2e7d32"))
+
+            baseline = r["baseline"]
+            base_text = "—" if baseline is None else _fmt_silver(baseline)
+            vol = r["vol_per_day"]
+            vol_text = "—" if vol is None else str(vol)
+
+            verdict_item = QTableWidgetItem(r["verdict"])
+            v = r["verdict"]
+            if v.startswith("🚩"):
+                verdict_item.setForeground(QColor("#b71c1c"))
+            elif v.startswith("⚠"):
+                verdict_item.setForeground(QColor("#c62828"))
+            elif v.startswith("Slightly"):
+                verdict_item.setForeground(QColor("#b08800"))
+            elif v.startswith("✓") or v.startswith("Below"):
+                verdict_item.setForeground(QColor("#2e7d32"))
+            else:
+                verdict_item.setForeground(QColor("#888888"))
+
+            name_item = QTableWidgetItem(r["name"])
+            name_item.setToolTip(r["id"])
+
+            self.table.setItem(row_i, 0, name_item)
+            self.table.setItem(row_i, 1, QTableWidgetItem(tier_label))
+            self.table.setItem(row_i, 2, QTableWidgetItem(QUALITIES.get(r["quality"], "?")))
+            self.table.setItem(row_i, 3, QTableWidgetItem(r["city"]))
+            self.table.setItem(row_i, 4, NumericItem(_fmt_silver(r["current"]), r["current"]))
+            self.table.setItem(row_i, 5, NumericItem(base_text, baseline))
+            self.table.setItem(row_i, 6, spike_item)
+            self.table.setItem(row_i, 7, NumericItem(vol_text, -1 if vol is None else vol))
+            self.table.setItem(row_i, 8, verdict_item)
+            self.table.setItem(row_i, 9, QTableWidgetItem(_fmt_age(r["age"])))
+        self.table.setSortingEnabled(True)
+
+
+class ScamTab(QWidget):
+    """Flag gear listings priced far above their real recent traded value.
+
+    Catches the bundle/trade scam where one wildly overpriced item inflates a
+    deal's apparent worth. Spike x = current listing ÷ history-based fair value.
+    Tiers/enchants/cities drive the fetch; spike threshold, min inflation, min
+    volume and slot group are instant client-side filters (no rescan).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.all_results: list[dict] = []
+        self._worker = None
+        self._pending = False
+        self._last_scan_ts = "—"
+
+        layout = QVBoxLayout(self)
+
+        info = QLabel(
+            "Scans the market for items listed FAR above their real recent traded price — "
+            "the planted/overpriced listings used in bundle & trade scams. Spike × = current "
+            "listing ÷ fair value (volume-weighted 30-day traded average). A high spike on a "
+            "low-volume item is almost certainly fake."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        # Fetch-driving filters: tier + enchant (gear universe).
+        gear_row = QHBoxLayout()
+        gear_row.addWidget(QLabel("Tier:"))
+        self.tier_checks = {}
+        for t in BM_TIERS:
+            cb = QCheckBox(f"T{t}")
+            cb.setChecked(_load_bool(f"scam/tier/{t}", True))
+            cb.stateChanged.connect(self._on_city_changed)
+            gear_row.addWidget(cb)
+            self.tier_checks[t] = cb
+
+        gear_row.addSpacing(20)
+        gear_row.addWidget(QLabel("Enchant:"))
+        self.enchant_checks = {}
+        for e in BM_ENCHANTS:
+            cb = QCheckBox(f".{e}")
+            cb.setChecked(_load_bool(f"scam/enchant/{e}", e <= 1))
+            cb.stateChanged.connect(self._on_city_changed)
+            gear_row.addWidget(cb)
+            self.enchant_checks[e] = cb
+
+        gear_row.addSpacing(20)
+        gear_row.addWidget(QLabel("Slot:"))
+        self.group_checks = {}
+        for g in SLOT_GROUPS:
+            cb = QCheckBox(g)
+            cb.setChecked(_load_bool(f"scam/group/{g}", True))
+            cb.stateChanged.connect(self._on_filter_changed)
+            gear_row.addWidget(cb)
+            self.group_checks[g] = cb
+        gear_row.addStretch()
+        layout.addLayout(gear_row)
+
+        # Cities (drive the fetch).
+        city_row = QHBoxLayout()
+        city_row.addWidget(QLabel("Cities:"))
+        self.city_checks = {}
+        for city in CITIES:
+            cb = QCheckBox(city)
+            cb.setChecked(_load_bool(f"scam/city/{city}", city != "Caerleon"))
+            cb.stateChanged.connect(self._on_city_changed)
+            city_row.addWidget(cb)
+            self.city_checks[city] = cb
+        city_row.addStretch()
+        layout.addLayout(city_row)
+
+        # Actions + client-side thresholds.
+        action_row = QHBoxLayout()
+        self.refresh_btn = QPushButton("Scan market")
+        self.refresh_btn.clicked.connect(self._refresh)
+        action_row.addWidget(self.refresh_btn)
+
+        self.bundle_btn = QPushButton("Check a bundle…")
+        self.bundle_btn.setToolTip(
+            "Verify the specific items in a trade someone is offering you, item by item."
+        )
+        self.bundle_btn.clicked.connect(self._open_bundle_check)
+        action_row.addWidget(self.bundle_btn)
+
+        action_row.addSpacing(15)
+        action_row.addWidget(QLabel("Min spike ×:"))
+        self.min_spike = QDoubleSpinBox()
+        self.min_spike.setRange(1.0, 1000.0)
+        self.min_spike.setSingleStep(0.5)
+        self.min_spike.setDecimals(1)
+        self.min_spike.setValue(float(settings.value("scam/min_spike", 3.0)))
+        self.min_spike.valueChanged.connect(self._on_filter_changed)
+        action_row.addWidget(self.min_spike)
+
+        action_row.addSpacing(10)
+        action_row.addWidget(QLabel("Min inflation:"))
+        self.min_inflation = QSpinBox()
+        self.min_inflation.setRange(0, 999_999_999)
+        self.min_inflation.setSingleStep(5_000)
+        self.min_inflation.setValue(int(settings.value("scam/min_inflation", 10_000)))
+        action_row.addWidget(self.min_inflation)
+        self.min_inflation.valueChanged.connect(self._on_filter_changed)
+
+        action_row.addSpacing(10)
+        action_row.addWidget(QLabel("Max vol/day:"))
+        self.max_vol = QSpinBox()
+        self.max_vol.setRange(0, 999_999)
+        self.max_vol.setSingleStep(5)
+        self.max_vol.setValue(int(settings.value("scam/max_vol", 0)))
+        self.max_vol.setSpecialValueText("any")  # 0 = no volume cap
+        self.max_vol.setToolTip(
+            "Only show items trading at or below this many units/day.\n"
+            "Fake prices live in thin markets — set e.g. 5 to focus on them. 'any' = no cap."
+        )
+        self.max_vol.valueChanged.connect(self._on_filter_changed)
+        action_row.addWidget(self.max_vol)
+
+        self.status = QLabel("Idle.")
+        action_row.addSpacing(10)
+        action_row.addWidget(self.status)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+
+        self.table = QTableWidget(0, 10)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Item",
+                "Tier",
+                "Quality",
+                "City",
+                "Listed price",
+                "Fair value",
+                "Inflation",
+                "Spike ×",
+                "Vol/day",
+                "Data age",
+            ]
+        )
+        self.table.setSortingEnabled(True)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        self._refresh()
+
+    def save_state(self):
+        for t, cb in self.tier_checks.items():
+            settings.setValue(f"scam/tier/{t}", cb.isChecked())
+        for e, cb in self.enchant_checks.items():
+            settings.setValue(f"scam/enchant/{e}", cb.isChecked())
+        for g, cb in self.group_checks.items():
+            settings.setValue(f"scam/group/{g}", cb.isChecked())
+        for c, cb in self.city_checks.items():
+            settings.setValue(f"scam/city/{c}", cb.isChecked())
+        settings.setValue("scam/min_spike", self.min_spike.value())
+        settings.setValue("scam/min_inflation", self.min_inflation.value())
+        settings.setValue("scam/max_vol", self.max_vol.value())
+
+    def _open_bundle_check(self):
+        cities = [c for c, cb in self.city_checks.items() if cb.isChecked()]
+        if not cities:
+            self.status.setText("Pick at least one city first (bundle check uses them).")
+            return
+        dlg = BundleCheckDialog(cities, parent=self)
+        dlg.exec()
+
+    def _on_filter_changed(self):
+        # Client-side only — no network rescan.
+        self.save_state()
+        self._apply_filters()
+
+    def _on_city_changed(self):
+        # Tier / enchant / city drive the fetch.
+        self.save_state()
+        self._refresh()
+
+    def _refresh(self):
+        cities = [c for c, cb in self.city_checks.items() if cb.isChecked()]
+        tiers = [t for t, cb in self.tier_checks.items() if cb.isChecked()]
+        enchants = [e for e, cb in self.enchant_checks.items() if cb.isChecked()]
+        if not cities or not tiers or not enchants:
+            self.status.setText("Pick at least one city, tier and enchant.")
+            return
+        if self._worker is not None and self._worker.isRunning():
+            self._pending = True
+            return
+        self.refresh_btn.setEnabled(False)
+        self.status.setText(f"Scanning {len(tiers)} tier(s) across {len(cities)} cities…")
+        worker = ScamWorker(cities, tiers, enchants)
+        worker.finished_ok.connect(self._on_results)
+        worker.failed.connect(self._on_error)
+        worker.finished.connect(self._on_worker_done)
+        self._worker = worker
+        worker.start()
+
+    def _on_results(self, results: list[dict]):
+        self.all_results = results
+        self._last_scan_ts = datetime.now().strftime("%H:%M:%S")
+        self.refresh_btn.setEnabled(True)
+        self._apply_filters()
+
+    def _on_error(self, msg: str):
+        self.status.setText(f"Error: {msg}")
+        self.refresh_btn.setEnabled(True)
+
+    def _on_worker_done(self):
+        self._worker = None
+        if self._pending:
+            self._pending = False
+            self._refresh()
+
+    def _apply_filters(self):
+        min_spike = self.min_spike.value()
+        min_inflation = self.min_inflation.value()
+        max_vol = self.max_vol.value()  # 0 = no cap
+        groups = {g for g, cb in self.group_checks.items() if cb.isChecked()}
+
+        filtered = [
+            r
+            for r in self.all_results
+            if r["spike"] >= min_spike
+            and r["inflation"] >= min_inflation
+            and r["group"] in groups
+            and (max_vol == 0 or r["vol_per_day"] <= max_vol)
+        ]
+        self._filtered_rows = filtered
+        self.status.setText(
+            f"Showing {len(filtered)} of {len(self.all_results)} flagged listings "
+            f"(spike ≥ {min_spike:.1f}×) — scanned {self._last_scan_ts}."
+        )
+
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(filtered))
+        for row_i, r in enumerate(filtered):
+            tier_label = f"T{r['tier']}.{r['enchant']}"
+            spike = r["spike"]
+            spike_item = NumericItem(f"{spike:.1f}×", spike)
+            if spike >= 10:
+                spike_item.setForeground(QColor("#b71c1c"))  # deep red
+            elif spike >= 5:
+                spike_item.setForeground(QColor("#c62828"))  # red
+            else:
+                spike_item.setForeground(QColor("#b08800"))  # amber
+            spike_item.setToolTip(
+                f"Listed at {_fmt_silver(r['current'])}, but the 30-day traded "
+                f"average is {_fmt_silver(r['baseline'])} — {spike:.1f}× over fair value."
+            )
+
+            vol = r["vol_per_day"]
+            vol_item = NumericItem(str(vol), vol)
+            # Low volume + high spike = almost certainly a planted price.
+            if vol < 5:
+                vol_item.setForeground(QColor("#c62828"))
+                vol_item.setToolTip(
+                    "Very thin market — a fake price here can sit unchallenged. "
+                    "Strong corroboration that this listing is bogus."
+                )
+            elif vol < 20:
+                vol_item.setForeground(QColor("#b08800"))
+            else:
+                vol_item.setForeground(QColor("#2e7d32"))
+                vol_item.setToolTip(
+                    "Actively traded — a real (if temporary) price spike is more "
+                    "plausible here than in a thin market."
+                )
+
+            age_item = QTableWidgetItem(_fmt_age(r["age"]))
+            age_item.setToolTip(f"Listing seen: {_abs_timestamp(r['age'])}")
+
+            name_item = QTableWidgetItem(r["name"])
+            name_item.setToolTip(r["id"])
+
+            self.table.setItem(row_i, 0, name_item)
+            self.table.setItem(row_i, 1, QTableWidgetItem(tier_label))
+            self.table.setItem(row_i, 2, QTableWidgetItem(QUALITIES.get(r["quality"], "?")))
+            self.table.setItem(row_i, 3, QTableWidgetItem(r["city"]))
+            self.table.setItem(row_i, 4, NumericItem(_fmt_silver(r["current"]), r["current"]))
+            self.table.setItem(row_i, 5, NumericItem(_fmt_silver(r["baseline"]), r["baseline"]))
+            self.table.setItem(row_i, 6, NumericItem(_fmt_silver(r["inflation"]), r["inflation"]))
+            self.table.setItem(row_i, 7, spike_item)
+            self.table.setItem(row_i, 8, vol_item)
+            self.table.setItem(row_i, 9, age_item)
+        self.table.setSortingEnabled(True)
+        self.table.sortItems(7, Qt.DescendingOrder)
+
+
+class CraftDetailDialog(QDialog):
+    def __init__(self, parent, row: dict):
+        super().__init__(parent)
+        self.setWindowTitle(f"{row['name']} — craft breakdown")
+        self.resize(620, 480)
+        layout = QVBoxLayout(self)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(self._build_text(row))
+        layout.addWidget(text)
+
+    @staticmethod
+    def _build_text(r: dict) -> str:
+        rr = r["return_rate"]
+        lines = [f"=== {r['name']}  (T{r['tier']}.{r['enchant']}) ===", ""]
+        if r["no_recipe"]:
+            lines.append("No known crafting recipe for this item.")
+            return "\n".join(lines)
+        lines.append(f"Resource return rate: {rr * 100:.1f}%  (refunds returnable materials)")
+        lines.append("")
+        lines.append("--- Materials (bought instant at cheapest selected city) ---")
+        for m in r["materials"]:
+            ret_note = "" if m["ret"] else "  [artifact/token — never refunded]"
+            if m["unit_price"] is None:
+                lines.append(f"{m['count']}x {m['name']}: no live price{ret_note}")
+            else:
+                lines.append(
+                    f"{m['count']}x {m['name']} @ {m['unit_price']:,} in {m['city']}"
+                    f"  ->  effective {m['eff_count']:.2f} x {m['unit_price']:,} = "
+                    f"{int(round(m['cost'])):,}{ret_note}"
+                )
+        lines.append("")
+        cc = r["craft_cost"]
+        lines.append(f"Total craft cost: {('—' if cc is None else format(int(round(cc)), ','))}")
+        lines.append("")
+        lines.append("--- Sell ---")
+        if r["net_sell"] is None:
+            lines.append("No live sell price (no city listing and no Black Market buy order).")
+        else:
+            tax = "4% BM tax" if r["sell_venue"] == "Black Market" else "6.5% sell-order tax/fee"
+            lines.append(
+                f"Best: {r['sell_venue']} @ {r['sell_price']:,}  ->  net {int(round(r['net_sell'])):,} "
+                f"(after {tax})"
+            )
+        lines.append("")
+        if r["profit"] is not None:
+            lines.append(f"PROFIT per craft: {int(round(r['profit'])):,}")
+            if r["roi"] is not None:
+                lines.append(f"ROI on materials: {r['roi'] * 100:.1f}%")
+        else:
+            lines.append(f"Profit unavailable — missing: {', '.join(r['missing'])}")
+        lines.append("")
+        lines.append("Note: assumes Normal quality and ignores station usage fees.")
+        return "\n".join(lines)
+
+
+class CraftTab(QWidget):
+    """Search any craftable gear and see its net craft profit.
+
+    Buy materials instant at the cheapest selected city (return rate refunds the
+    returnable ones), then sell the crafted item the better of: list in a city
+    (net 6.5%) or instant-sell to the Black Market (net 4%). The return rate is
+    driven by the crafting-city / focus / bonus-day toggles.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._worker = None
+        self.results: list[dict] = []
+
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            "Search any craftable item, add it to the list, and check the net profit of "
+            "crafting it. Materials are bought instant at the cheapest selected city; the "
+            "crafted item is sold the better of a city listing (net 6.5%) or the Black Market "
+            "(net 4%). Set the return rate with the toggles below."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        # Crafting bonus toggles -> return rate.
+        opt_row = QHBoxLayout()
+        self.spec_cb = QCheckBox("Crafting bonus city (+15)")
+        self.spec_cb.setChecked(_load_bool("craft/spec", False))
+        self.spec_cb.setToolTip("Crafting in the city that specializes in this item type.")
+        self.spec_cb.stateChanged.connect(self._on_rate_changed)
+        opt_row.addWidget(self.spec_cb)
+
+        self.focus_cb = QCheckBox("Use focus (+59)")
+        self.focus_cb.setChecked(_load_bool("craft/focus", False))
+        self.focus_cb.stateChanged.connect(self._on_rate_changed)
+        opt_row.addWidget(self.focus_cb)
+
+        opt_row.addSpacing(10)
+        opt_row.addWidget(QLabel("Bonus day:"))
+        self.bonus_combo = QComboBox()
+        for label in CRAFT_BONUS_DAY:
+            self.bonus_combo.addItem(label)
+        self.bonus_combo.setCurrentText(settings.value("craft/bonus_day", "None"))
+        self.bonus_combo.currentTextChanged.connect(self._on_rate_changed)
+        opt_row.addWidget(self.bonus_combo)
+
+        self.rate_label = QLabel()
+        self.rate_label.setStyleSheet("font-weight: bold;")
+        opt_row.addSpacing(15)
+        opt_row.addWidget(self.rate_label)
+        opt_row.addStretch()
+        layout.addLayout(opt_row)
+
+        # Cities (drive the fetch: where materials are bought / item listed).
+        city_row = QHBoxLayout()
+        city_row.addWidget(QLabel("Cities:"))
+        self.city_checks = {}
+        for city in CITIES:
+            cb = QCheckBox(city)
+            cb.setChecked(_load_bool(f"craft/city/{city}", city != "Caerleon"))
+            city_row.addWidget(cb)
+            self.city_checks[city] = cb
+        city_row.addStretch()
+        layout.addLayout(city_row)
+
+        # Search (left) + chosen items (right).
+        picker = QHBoxLayout()
+        left = QVBoxLayout()
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Type an item name, e.g. Broadsword, Mercenary Jacket…")
+        self.search_box.textChanged.connect(self._on_search)
+        left.addWidget(self.search_box)
+        self.results_list = QListWidget()
+        self.results_list.itemDoubleClicked.connect(self._add_item)
+        left.addWidget(self.results_list)
+        picker.addLayout(left)
+
+        mid = QVBoxLayout()
+        mid.addStretch()
+        add_btn = QPushButton("Add →")
+        add_btn.clicked.connect(lambda: self._add_item(self.results_list.currentItem()))
+        mid.addWidget(add_btn)
+        rm_btn = QPushButton("← Remove")
+        rm_btn.clicked.connect(self._remove_item)
+        mid.addWidget(rm_btn)
+        mid.addStretch()
+        picker.addLayout(mid)
+
+        right = QVBoxLayout()
+        right.addWidget(QLabel("Items to craft-check:"))
+        self.craft_list = QListWidget()
+        self.craft_list.itemDoubleClicked.connect(lambda _: self._remove_item())
+        right.addWidget(self.craft_list)
+        picker.addLayout(right)
+        layout.addLayout(picker)
+
+        action_row = QHBoxLayout()
+        self.check_btn = QPushButton("Check craft profit")
+        self.check_btn.clicked.connect(self._check)
+        action_row.addWidget(self.check_btn)
+        clear_btn = QPushButton("Clear list")
+        clear_btn.clicked.connect(self.craft_list.clear)
+        action_row.addWidget(clear_btn)
+        self.status = QLabel("Add items, then check.")
+        action_row.addWidget(self.status)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(
+            ["Item", "Tier", "Craft cost", "Sell (net)", "Venue", "Profit", "ROI %", "Notes"]
+        )
+        self.table.setSortingEnabled(True)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.itemDoubleClicked.connect(self._open_detail)
+        layout.addWidget(self.table)
+
+        self._update_rate_label()
+
+    def _return_rate(self) -> float:
+        return craft_return_rate(
+            spec=self.spec_cb.isChecked(),
+            focus=self.focus_cb.isChecked(),
+            bonus_day=CRAFT_BONUS_DAY[self.bonus_combo.currentText()],
+        )
+
+    def _update_rate_label(self):
+        self.rate_label.setText(f"Return rate: {self._return_rate() * 100:.1f}%")
+
+    def _on_rate_changed(self):
+        self._update_rate_label()
+        self.save_state()
+
+    def save_state(self):
+        settings.setValue("craft/spec", self.spec_cb.isChecked())
+        settings.setValue("craft/focus", self.focus_cb.isChecked())
+        settings.setValue("craft/bonus_day", self.bonus_combo.currentText())
+        for c, cb in self.city_checks.items():
+            settings.setValue(f"craft/city/{c}", cb.isChecked())
+
+    def _on_search(self, text):
+        self.results_list.clear()
+        for iid in names.search_ids(text):
+            meta = names.parse_id(iid)
+            label = f"{names.get_name(iid)}  (T{meta['tier']}.{meta['enchant']})"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, iid)
+            self.results_list.addItem(item)
+
+    def _add_item(self, item):
+        if item is None:
+            return
+        iid = item.data(Qt.UserRole)
+        for i in range(self.craft_list.count()):
+            if self.craft_list.item(i).data(Qt.UserRole) == iid:
+                return
+        new = QListWidgetItem(item.text())
+        new.setData(Qt.UserRole, iid)
+        self.craft_list.addItem(new)
+
+    def _remove_item(self):
+        row = self.craft_list.currentRow()
+        if row >= 0:
+            self.craft_list.takeItem(row)
+
+    def _check(self):
+        ids = [
+            self.craft_list.item(i).data(Qt.UserRole)
+            for i in range(self.craft_list.count())
+        ]
+        if not ids:
+            self.status.setText("Add at least one item first.")
+            return
+        cities = [c for c, cb in self.city_checks.items() if cb.isChecked()]
+        if not cities:
+            self.status.setText("Pick at least one city.")
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.save_state()
+        self.check_btn.setEnabled(False)
+        self.status.setText(f"Checking {len(ids)} item(s)…")
+        worker = CraftWorker(ids, cities, self._return_rate())
+        worker.finished_ok.connect(self._on_results)
+        worker.failed.connect(self._on_error)
+        worker.finished.connect(self._on_worker_done)
+        self._worker = worker
+        worker.start()
+
+    def _on_error(self, msg):
+        self.status.setText(f"Error: {msg}")
+        self.check_btn.setEnabled(True)
+
+    def _on_worker_done(self):
+        self._worker = None
+
+    def _open_detail(self, _item):
+        row = self.table.currentRow()
+        if 0 <= row < len(self.results):
+            CraftDetailDialog(self, self.results[row]).exec()
+
+    def _on_results(self, results):
+        self.check_btn.setEnabled(True)
+        self.results = results
+        self.status.setText(
+            f"{len(results)} item(s). Double-click a row for the material breakdown."
+            if results
+            else "No results."
+        )
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(results))
+        for row_i, r in enumerate(results):
+            tier_label = f"T{r['tier']}.{r['enchant']}" if r["tier"] else "—"
+            profit = r["profit"]
+            profit_item = NumericItem(_silver_or_dash(profit), profit)
+            if profit is not None:
+                profit_item.setForeground(QColor("#2e7d32") if profit > 0 else QColor("#b71c1c"))
+            roi = r["roi"]
+            roi_item = NumericItem("—" if roi is None else f"{roi * 100:.1f}%", roi)
+            if roi is not None:
+                roi_item.setForeground(QColor("#2e7d32") if roi > 0 else QColor("#b71c1c"))
+
+            if r["no_recipe"]:
+                note = "no recipe"
+            elif r["missing"]:
+                note = "missing: " + ", ".join(r["missing"])
+            else:
+                note = ""
+
+            name_item = QTableWidgetItem(r["name"])
+            name_item.setToolTip(r["id"])
+
+            self.table.setItem(row_i, 0, name_item)
+            self.table.setItem(row_i, 1, QTableWidgetItem(tier_label))
+            self.table.setItem(row_i, 2, NumericItem(_silver_or_dash(r["craft_cost"]), r["craft_cost"]))
+            self.table.setItem(row_i, 3, NumericItem(_silver_or_dash(r["net_sell"]), r["net_sell"]))
+            self.table.setItem(row_i, 4, QTableWidgetItem(r["sell_venue"] or "—"))
+            self.table.setItem(row_i, 5, profit_item)
+            self.table.setItem(row_i, 6, roi_item)
+            self.table.setItem(row_i, 7, QTableWidgetItem(note))
+        self.table.setSortingEnabled(True)
+        self.table.sortItems(5, Qt.DescendingOrder)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1424,10 +2300,14 @@ class MainWindow(QMainWindow):
         self.bm = BlackMarketTab()
         self.haul = ResourceHaulTab()
         self.gather = GatherTab()
+        self.craft = CraftTab()
+        self.scam = ScamTab()
         tabs.addTab(self.refining, "Refining")
         tabs.addTab(self.bm, "Black Market flip")
         tabs.addTab(self.haul, "Resource haul")
         tabs.addTab(self.gather, "Gather advisor")
+        tabs.addTab(self.craft, "Crafting")
+        tabs.addTab(self.scam, "Scam check")
         self.setCentralWidget(tabs)
 
     def closeEvent(self, event):
@@ -1435,6 +2315,8 @@ class MainWindow(QMainWindow):
         self.bm.save_state()
         self.haul.save_state()
         self.gather.save_state()
+        self.craft.save_state()
+        self.scam.save_state()
         super().closeEvent(event)
 
 

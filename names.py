@@ -65,6 +65,27 @@ def gear_ids() -> list[str]:
     return list(_GEAR_IDS)
 
 
+def search_ids(query: str, limit: int = 60) -> list[str]:
+    """Gear ids whose English name (or id) contains `query`, case-insensitive.
+
+    Sorted by name, then tier, then enchant so a search like 'rotcaller' lists
+    each tier/enchant variant in a predictable order for the bundle picker.
+    """
+    _load()
+    q = query.strip().lower()
+    if not q:
+        return []
+    matches = []
+    for iid in _GEAR_IDS:
+        name = _NAMES.get(iid, iid)
+        if q in name.lower() or q in iid.lower():
+            meta = parse_id(iid)
+            matches.append((name, meta["tier"] if meta else 0,
+                            meta["enchant"] if meta else 0, iid))
+    matches.sort(key=lambda t: (t[0], t[1], t[2]))
+    return [t[3] for t in matches[:limit]]
+
+
 def parse_id(item_id: str) -> dict | None:
     """Return tier, enchant, slot category for an item id, or None."""
     m = _ID_RE.match(item_id)

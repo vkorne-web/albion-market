@@ -14,6 +14,7 @@ from items import (
     build_resource_items,
 )
 import names
+import recipes
 
 MAX_AGE_SECONDS = 60 * 60 * 6  # 6 hours; player-sourced data is often stale
 
@@ -534,4 +535,361 @@ async def scan_black_market(
         except Exception:
             pass
 
+    return results
+
+
+# ---------- Manipulation / scam detector ----------
+#
+# Bundle/trade scam: someone offers a container of items where ONE is listed far
+# above its real value, inflating the whole deal's apparent worth. The tell is a
+# current listing price way above what the item actually trades at. The /history
+# avg_price is the real traded price and is hard to fake — moving it means
+# actually selling large volume at the inflated price — so it's a trustworthy
+# baseline to compare a live listing against.
+
+# Volume-weighted traded-price baseline window. Long enough to be stable, short
+# enough to still track genuine price moves.
+BASELINE_DAYS = 30
+
+# Recent-volume window (same convention as the other tabs' Vol/day).
+MANIP_VOL_DAYS = 7
+
+# Server-side noise floor: only return listings at least this far above baseline.
+# The user's real knob (default 3x) is a client-side filter on top of this, so
+# adjusting it never triggers a rescan.
+SPIKE_FLOOR = 1.5
+
+
+def _baseline_by_quality(
+    history_rows: list[dict], baseline_days: int = BASELINE_DAYS, vol_days: int = MANIP_VOL_DAYS
+) -> dict[tuple[str, int], dict]:
+    """{(item_id, quality): {"baseline": volume-weighted avg traded price,
+    "vol_per_day": recent avg units/day}}.
+
+    Pools history across all returned locations into one fair-value estimate per
+    item+quality, weighting each day's avg_price by that day's item_count so
+    heavily-traded days dominate. Days with no price or no volume are ignored.
+    """
+    agg: dict[tuple[str, int], dict] = {}
+    for row in history_rows:
+        key = (row.get("item_id"), row.get("quality", 1))
+        data = row.get("data") or []
+        if not data:
+            continue
+        recent = data[-baseline_days:]
+        wsum = 0.0
+        weight = 0
+        for d in recent:
+            p = d.get("avg_price") or 0
+            c = d.get("item_count") or 0
+            if p > 0 and c > 0:
+                wsum += p * c
+                weight += c
+        if weight <= 0:
+            continue
+        vol_recent = data[-vol_days:]
+        vtotal = sum(d.get("item_count", 0) for d in vol_recent)
+        vol_per_day = vtotal // max(1, len(vol_recent))
+
+        slot = agg.setdefault(key, {"wsum": 0.0, "weight": 0, "vol_per_day": 0})
+        slot["wsum"] += wsum
+        slot["weight"] += weight
+        slot["vol_per_day"] += vol_per_day  # pooled across cities
+
+    out: dict[tuple[str, int], dict] = {}
+    for key, slot in agg.items():
+        if slot["weight"] <= 0:
+            continue
+        out[key] = {
+            "baseline": slot["wsum"] / slot["weight"],
+            "vol_per_day": slot["vol_per_day"],
+        }
+    return out
+
+
+async def scan_manipulation(
+    cities: list[str] | None = None,
+    tiers: list[int] | None = None,
+    enchants: list[int] | None = None,
+    max_age_seconds: int = MAX_AGE_SECONDS,
+) -> list[dict]:
+    """Find gear listings priced far above their real recent traded value.
+
+    Returns every (item, quality, city) whose current sell_price_min is at least
+    SPIKE_FLOOR x its history baseline. Spike threshold / min inflation / min
+    volume are applied client-side so tuning them never rescans.
+    """
+    cities = cities or [c for c in CITIES if c != "Caerleon"]
+    tiers_set = set(tiers) if tiers else {4, 5, 6, 7, 8}
+    enchants_set = set(enchants) if enchants else {0, 1}
+
+    candidates = []
+    for iid in names.gear_ids():
+        meta = names.parse_id(iid)
+        if not meta:
+            continue
+        if meta["tier"] not in tiers_set or meta["enchant"] not in enchants_set:
+            continue
+        candidates.append((iid, meta))
+
+    item_ids = [iid for iid, _ in candidates]
+    price_rows = await fetch_prices(item_ids, cities)
+    history_rows = await fetch_history(item_ids, cities, time_scale=24)
+    now = datetime.now(timezone.utc)
+    baselines = _baseline_by_quality(history_rows)
+
+    # Quality-aware price index: (item_id, city, quality) -> row.
+    idx: dict[tuple[str, str, int], dict] = {}
+    for row in price_rows:
+        idx[(row.get("item_id"), row.get("city"), row.get("quality", 1))] = row
+
+    results = []
+    for iid, meta in candidates:
+        for q in (1, 2, 3, 4, 5):
+            base = baselines.get((iid, q))
+            if not base or base["baseline"] <= 0:
+                continue
+            baseline = base["baseline"]
+            for city in cities:
+                row = idx.get((iid, city, q))
+                if not row:
+                    continue
+                current = row.get("sell_price_min") or 0
+                age = age_seconds(row, "sell_price_min_date", now)
+                if current <= 0 or age is None or age > max_age_seconds:
+                    continue
+                spike = current / baseline
+                if spike < SPIKE_FLOOR:
+                    continue
+                results.append(
+                    {
+                        "id": iid,
+                        "name": names.get_name(iid),
+                        "tier": meta["tier"],
+                        "enchant": meta["enchant"],
+                        "quality": q,
+                        "slot_category": meta["slot_category"],
+                        "group": SLOT_TO_GROUP.get(meta["slot_category"], "Other"),
+                        "city": city,
+                        "current": current,
+                        "baseline": int(round(baseline)),
+                        "inflation": int(round(current - baseline)),
+                        "spike": spike,
+                        "vol_per_day": base["vol_per_day"],
+                        "age": age,
+                    }
+                )
+
+    results.sort(key=lambda r: r["spike"], reverse=True)
+    return results
+
+
+def _verdict(spike, vol_per_day) -> str:
+    """Plain-language read on a listing, given its spike and liquidity."""
+    if spike is None:
+        return "No history — can't judge"
+    thin = vol_per_day is not None and vol_per_day < 5
+    if spike >= 5:
+        return "🚩 Very suspicious" + (" (thin market)" if thin else "")
+    if spike >= 3:
+        return "⚠ Suspicious" + (" (thin market)" if thin else "")
+    if spike >= 1.5:
+        return "Slightly high"
+    if spike < 0.7:
+        return "Below market (cheap)"
+    return "✓ Looks normal"
+
+
+async def check_items(
+    item_ids: list[str],
+    cities: list[str] | None = None,
+    max_age_seconds: int = MAX_AGE_SECONDS,
+) -> list[dict]:
+    """Verify SPECIFIC items (e.g. the contents of a bundle someone offers you).
+
+    Unlike scan_manipulation this returns EVERY listing for the requested ids —
+    including normal-priced ones — each with a plain-language verdict, so you can
+    eyeball a whole trade item by item. No spike floor.
+    """
+    cities = cities or [c for c in CITIES if c != "Caerleon"]
+    item_ids = list(dict.fromkeys(item_ids))
+    if not item_ids:
+        return []
+
+    price_rows = await fetch_prices(item_ids, cities)
+    history_rows = await fetch_history(item_ids, cities, time_scale=24)
+    now = datetime.now(timezone.utc)
+    baselines = _baseline_by_quality(history_rows)
+
+    idx: dict[tuple[str, str, int], dict] = {}
+    for row in price_rows:
+        idx[(row.get("item_id"), row.get("city"), row.get("quality", 1))] = row
+
+    results = []
+    for iid in item_ids:
+        meta = names.parse_id(iid) or {}
+        for q in (1, 2, 3, 4, 5):
+            for city in cities:
+                row = idx.get((iid, city, q))
+                if not row:
+                    continue
+                current = row.get("sell_price_min") or 0
+                age = age_seconds(row, "sell_price_min_date", now)
+                if current <= 0 or age is None or age > max_age_seconds:
+                    continue
+                base = baselines.get((iid, q))
+                baseline = base["baseline"] if base else None
+                vol = base["vol_per_day"] if base else None
+                spike = (current / baseline) if baseline and baseline > 0 else None
+                results.append(
+                    {
+                        "id": iid,
+                        "name": names.get_name(iid),
+                        "tier": meta.get("tier"),
+                        "enchant": meta.get("enchant"),
+                        "quality": q,
+                        "city": city,
+                        "current": current,
+                        "baseline": int(round(baseline)) if baseline else None,
+                        "inflation": int(round(current - baseline)) if baseline else None,
+                        "spike": spike,
+                        "vol_per_day": vol,
+                        "age": age,
+                        "verdict": _verdict(spike, vol),
+                    }
+                )
+
+    # Most suspicious first; rows with no baseline (spike None) sink to the bottom.
+    results.sort(key=lambda r: (r["spike"] is not None, r["spike"] or 0), reverse=True)
+    return results
+
+
+async def scan_craft(
+    item_ids: list[str],
+    cities: list[str],
+    return_rate: float,
+    max_age_seconds: int = MAX_AGE_SECONDS,
+) -> list[dict]:
+    """Craft-profit for each gear id: material cost vs sell value.
+
+    Each material is bought at its cheapest selected city (instant buy =
+    sell_price_min), with the crafting return rate refunding the *returnable*
+    materials (artifacts/tokens, ret=False, are never refunded). The crafted
+    item is sold by listing your own order at the best sane city price, net of
+    SELL_ORDER_TAX. Quality is assumed Normal for both materials and output.
+    """
+    recs = {iid: recipes.get_recipe(iid) for iid in item_ids}
+    fetch_ids = set(item_ids)
+    for rec in recs.values():
+        if rec:
+            for m in rec["materials"]:
+                fetch_ids.add(m["id"])
+
+    # Materials are bought in the royal cities; the crafted item can be sold
+    # either by listing in a city OR instant-sold to the Black Market.
+    rows = await fetch_prices(list(fetch_ids), list({*cities, BLACK_MARKET}))
+    idx = index_rows(rows, quality=1)
+    now = datetime.now(timezone.utc)
+
+    results = []
+    for iid in item_ids:
+        meta = names.parse_id(iid)
+        base = {
+            "id": iid,
+            "name": names.get_name(iid),
+            "tier": meta["tier"] if meta else 0,
+            "enchant": meta["enchant"] if meta else 0,
+            "return_rate": return_rate,
+        }
+        rec = recs[iid]
+        if not rec:
+            results.append(
+                {
+                    **base,
+                    "no_recipe": True,
+                    "materials": [],
+                    "craft_cost": None,
+                    "sell_price": None,
+                    "sell_city": None,
+                    "sell_age": None,
+                    "net_sell": None,
+                    "profit": None,
+                    "roi": None,
+                    "missing": ["no known recipe"],
+                }
+            )
+            continue
+
+        mats = []
+        running_cost = 0.0
+        for m in rec["materials"]:
+            cs = _cheapest_sell(idx, m["id"], cities, now, max_age_seconds)
+            eff = m["count"] * (1 - return_rate) if m["ret"] else m["count"]
+            entry = {
+                "id": m["id"],
+                "name": names.get_name(m["id"]),
+                "count": m["count"],
+                "ret": m["ret"],
+                "eff_count": eff,
+            }
+            if cs is None:
+                entry.update({"unit_price": None, "city": None, "cost": None, "age": None})
+            else:
+                cost = eff * cs["price"]
+                running_cost += cost
+                entry.update(
+                    {"unit_price": cs["price"], "city": cs["city"], "cost": cost, "age": cs["age"]}
+                )
+            mats.append(entry)
+
+        missing = [m["name"] for m in mats if m["cost"] is None]
+        mats_complete = not missing
+        craft_cost = running_cost if mats_complete else None
+
+        # Sell option A: list your own order in a royal city (net 6.5%).
+        city_cities = [c for c in cities if c != BLACK_MARKET]
+        listing = _highest_listing(idx, iid, city_cities, now, max_age_seconds)
+        city_net = listing["price"] * (1 - SELL_ORDER_TAX) if listing else None
+        # Sell option B: instant-sell into the Black Market buy orders (net 4%).
+        bm_row = idx.get((iid, BLACK_MARKET))
+        bm_price = (bm_row or {}).get("buy_price_max") or 0
+        bm_age = age_seconds(bm_row, "buy_price_max_date", now) if bm_row else None
+        bm_ok = bm_price > 0 and bm_age is not None and bm_age <= max_age_seconds
+        bm_net = bm_price * (1 - BM_TAX) if bm_ok else None
+
+        options = []
+        if city_net is not None:
+            options.append((city_net, f"List @ {listing['city']}", listing["price"], listing["age"]))
+        if bm_net is not None:
+            options.append((bm_net, "Black Market", bm_price, bm_age))
+        if options:
+            net_sell, sell_venue, sell_price, sell_age = max(options, key=lambda o: o[0])
+        else:
+            net_sell = sell_venue = sell_price = sell_age = None
+            missing.append("item sell price")
+
+        if mats_complete and net_sell is not None:
+            profit = net_sell - craft_cost
+            roi = profit / craft_cost if craft_cost > 0 else None
+        else:
+            profit = roi = None
+
+        results.append(
+            {
+                **base,
+                "no_recipe": False,
+                "materials": mats,
+                "craft_cost": craft_cost,
+                "sell_price": sell_price,
+                "sell_venue": sell_venue,
+                "sell_age": sell_age,
+                "net_sell": net_sell,
+                "profit": profit,
+                "roi": roi,
+                "missing": missing,
+            }
+        )
+
+    # Most profitable first; incomplete rows (profit None) sink to the bottom.
+    results.sort(key=lambda r: (r["profit"] is not None, r["profit"] or 0), reverse=True)
     return results
