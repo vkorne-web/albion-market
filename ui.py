@@ -44,6 +44,7 @@ from items import (
 from scanner import (
     BM_TAX,
     check_items,
+    fetch_craft_prices,
     scan,
     scan_black_market,
     scan_craft,
@@ -280,6 +281,26 @@ class CraftWorker(QThread):
         try:
             self.finished_ok.emit(
                 asyncio.run(scan_craft(self.item_ids, self.cities, self.return_rate))
+            )
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class CraftCalcFetchWorker(QThread):
+    """Pulls live material/sell prices for every enchant tab in one batch."""
+
+    finished_ok = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, items, cities):
+        super().__init__()
+        self.items = items  # list of (crafted_id, [material_ids])
+        self.cities = cities
+
+    def run(self):
+        try:
+            self.finished_ok.emit(
+                asyncio.run(fetch_craft_prices(self.items, self.cities))
             )
         except Exception as e:
             self.failed.emit(str(e))
@@ -2438,33 +2459,262 @@ class CraftTab(QWidget):
         self.table.sortItems(5, Qt.DescendingOrder)
 
 
-class CraftCalcTab(QWidget):
-    """Manual-price crafting calculator (Nendys-style).
+class CraftCalcEnchantPanel(QWidget):
+    """One enchant level's calculator, shown as a sub-tab in the Craft calc tab.
 
-    Pick any craftable item, type in the market price of each material, and the
-    craft cost / net sell / profit / ROI update live — no network, you set the
-    prices. Entered prices are remembered per-material in QSettings, so a
-    material shared across items (e.g. a T5 metal bar) auto-fills when you load
-    another recipe. The return rate (which refunds returnable materials, never
-    artifacts) comes from the crafting-city / focus / bonus-day toggles.
+    Owns its materials table, per-material price spins, sell venue + price and the
+    profit/ROI summary. The return rate and batch size come from the shared
+    controls on the parent CraftCalcTab; the parent recomputes every panel when
+    those change. Material prices persist per material id, sell price per item id,
+    so they auto-fill when you reopen the same item.
     """
 
     PRICE_MAX = 999_999_999
+    STALE_AGE = 6 * 60 * 60  # older than this is flagged as stale after a fetch
+
+    def __init__(self, tab, item_id: str, materials: list[dict]):
+        super().__init__()
+        self._tab = tab
+        self.item_id = item_id
+        self.materials = materials
+        self.price_spins: dict[str, QSpinBox] = {}
+        self._building = True
+
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            [tr("Material"), tr("Qty/ea"), tr("Unit price"), tr("Buy qty"), tr("Line cost")]
+        )
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionMode(QTableWidget.NoSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        # Sell side (per enchant level — each sells at a different price).
+        sell_row = QHBoxLayout()
+        self.venue_label = QLabel(tr("Sell venue:"))
+        sell_row.addWidget(self.venue_label)
+        self.venue_combo = QComboBox()
+        self.venue_combo.addItem(tr("City listing (6.5% tax)"), "city")
+        self.venue_combo.addItem(tr("Black Market (4% tax)"), "bm")
+        saved_venue = settings.value(
+            f"craftcalc/sellvenue/{item_id}", settings.value("craftcalc/venue", "city")
+        )
+        vidx = self.venue_combo.findData(saved_venue)
+        self.venue_combo.setCurrentIndex(vidx if vidx >= 0 else 0)
+        self.venue_combo.currentTextChanged.connect(self._on_sell_changed)
+        sell_row.addWidget(self.venue_combo)
+
+        sell_row.addSpacing(10)
+        self.sell_label = QLabel(tr("Sell price:"))
+        sell_row.addWidget(self.sell_label)
+        self.sell_spin = QSpinBox()
+        self.sell_spin.setRange(0, self.PRICE_MAX)
+        self.sell_spin.setSingleStep(100)
+        self.sell_spin.setGroupSeparatorShown(True)
+        self.sell_spin.valueChanged.connect(self._on_sell_changed)
+        sell_row.addWidget(self.sell_spin)
+        sell_row.addStretch()
+        layout.addLayout(sell_row)
+
+        # Summary line.
+        summary = QHBoxLayout()
+        self.cost_label = QLabel(tr("Craft cost: —"))
+        self.net_label = QLabel(tr("Total income: —"))
+        self.profit_label = QLabel(tr("Profit: —"))
+        self.profit_label.setStyleSheet("font-weight: bold;")
+        self.unit_profit_label = QLabel(tr("Profit/unit: —"))
+        self.roi_label = QLabel(tr("ROI: —"))
+        for w in (self.cost_label, self.net_label, self.profit_label,
+                  self.unit_profit_label, self.roi_label):
+            summary.addWidget(w)
+            summary.addSpacing(20)
+        summary.addStretch()
+        layout.addLayout(summary)
+
+        self._build_table()
+        self.recompute()
+
+    def _build_table(self):
+        """(Re)populate the materials table + price spins from saved prices."""
+        self._building = True
+        self.price_spins = {}
+        self.table.setRowCount(len(self.materials))
+        for row, m in enumerate(self.materials):
+            name = names.get_name(m["id"])
+            if not m["ret"]:
+                name += tr("  [artifact]")
+            name_item = QTableWidgetItem(name)
+            name_item.setToolTip(m["id"])
+            self.table.setItem(row, 0, name_item)
+
+            qty_item = QTableWidgetItem(str(m["count"]))
+            qty_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.table.setItem(row, 1, qty_item)
+
+            spin = QSpinBox()
+            spin.setRange(0, self.PRICE_MAX)
+            spin.setSingleStep(100)
+            spin.setGroupSeparatorShown(True)
+            spin.setValue(int(settings.value(f"craftcalc/price/{m['id']}", 0)))
+            spin.valueChanged.connect(lambda v, mid=m["id"]: self._on_price_changed(mid, v))
+            self.table.setCellWidget(row, 2, spin)
+            self.price_spins[m["id"]] = spin
+
+            buy_item = QTableWidgetItem("")
+            buy_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.table.setItem(row, 3, buy_item)
+            cost_item = QTableWidgetItem("")
+            cost_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.table.setItem(row, 4, cost_item)
+
+        self.sell_spin.blockSignals(True)
+        self.sell_spin.setValue(int(settings.value(f"craftcalc/sell/{self.item_id}", 0)))
+        self.sell_spin.blockSignals(False)
+        self._building = False
+
+    def _on_price_changed(self, material_id: str, value: int):
+        settings.setValue(f"craftcalc/price/{material_id}", value)
+        self.recompute()
+
+    def _on_sell_changed(self, *_):
+        v = self.venue_combo.currentData()
+        settings.setValue(f"craftcalc/sellvenue/{self.item_id}", v)
+        settings.setValue("craftcalc/venue", v)  # last choice = default for new items
+        settings.setValue(f"craftcalc/sell/{self.item_id}", self.sell_spin.value())
+        self.recompute()
+
+    def apply_fetch(self, data: dict) -> dict:
+        """Fill prices from a fetch result for this item. Returns tally counts."""
+        mats = data.get("materials", {})
+        filled = missing = stale = 0
+        self._building = True
+        for mid, info in mats.items():
+            spin = self.price_spins.get(mid)
+            if spin is None:
+                continue
+            if info is None:
+                missing += 1
+                continue
+            spin.blockSignals(True)
+            spin.setValue(info["price"])
+            spin.blockSignals(False)
+            settings.setValue(f"craftcalc/price/{mid}", info["price"])
+            old = info["age"] is not None and info["age"] > self.STALE_AGE
+            if old:
+                stale += 1
+            tip = tr("{city} · {age} old").format(city=tr(info["city"]), age=_fmt_age(info["age"]))
+            if old:
+                tip = "⚠ " + tip + " " + tr("(check this — old data)")
+            spin.setToolTip(tip)
+            filled += 1
+
+        sell = data.get("sell_bm") if self.venue_combo.currentData() == "bm" else data.get("sell_city")
+        sell_missing = 0
+        if sell is not None:
+            self.sell_spin.blockSignals(True)
+            self.sell_spin.setValue(sell["price"])
+            self.sell_spin.blockSignals(False)
+            settings.setValue(f"craftcalc/sell/{self.item_id}", sell["price"])
+        else:
+            sell_missing = 1
+
+        self._building = False
+        self.recompute()
+        return {"filled": filled, "missing": missing, "stale": stale, "sell_missing": sell_missing}
+
+    def recompute(self):
+        if self._building:
+            return
+        rr = self._tab._return_rate()
+        runs = self._tab.runs_spin.value()
+        craft_cost = 0
+        for row, m in enumerate(self.materials):
+            price = self.price_spins[m["id"]].value()
+            # Relics/artifacts (ret=False) are never refunded — full count. Returnable
+            # materials are scaled by (1 - return rate); buy whole units (round up).
+            needed = m["count"] * runs * (1 - rr) if m["ret"] else m["count"] * runs
+            buy_qty = ceil(needed - 1e-9)
+            line = buy_qty * price
+            craft_cost += line
+
+            buy_item = self.table.item(row, 3)
+            buy_item.setText(_fmt_silver(buy_qty))
+            leftover = buy_qty - needed
+            if m["ret"] and leftover > 0.01:
+                buy_item.setToolTip(
+                    tr("Need ~{needed}; buy {buy} (≈{leftover} leftover)").format(
+                        needed=f"{needed:.1f}", buy=f"{buy_qty:,}", leftover=f"{leftover:.1f}"
+                    )
+                )
+            else:
+                buy_item.setToolTip("")
+            self.table.item(row, 4).setText(_fmt_silver(line))
+
+        if not self.materials:
+            for lbl, key in (
+                (self.cost_label, "Craft cost: —"), (self.net_label, "Total income: —"),
+                (self.profit_label, "Profit: —"), (self.unit_profit_label, "Profit/unit: —"),
+                (self.roi_label, "ROI: —"),
+            ):
+                lbl.setText(tr(key))
+            self.profit_label.setStyleSheet("font-weight: bold;")
+            return
+
+        tax = BM_TAX if self.venue_combo.currentData() == "bm" else SELL_ORDER_TAX
+        income = self.sell_spin.value() * (1 - tax) * runs
+        profit = income - craft_cost
+        roi = profit / craft_cost if craft_cost > 0 else None
+
+        self.cost_label.setText(tr("Craft cost: {v}").format(v=_fmt_silver(int(round(craft_cost)))))
+        self.net_label.setText(tr("Total income: {v}").format(v=_fmt_silver(int(round(income)))))
+        self.profit_label.setText(tr("Profit: {v}").format(v=_fmt_silver(int(round(profit)))))
+        self.unit_profit_label.setText(
+            tr("Profit/unit: {v}").format(v=_fmt_silver(int(round(profit / runs))))
+        )
+        color = "#2e7d32" if profit > 0 else ("#c62828" if profit < 0 else "#888888")
+        self.profit_label.setStyleSheet(f"font-weight: bold; color: {color};")
+        self.roi_label.setText(
+            tr("ROI: —") if roi is None else tr("ROI: {pct}%").format(pct=f"{roi * 100:.1f}")
+        )
+
+    def retranslate(self):
+        self.table.setHorizontalHeaderLabels(
+            [tr("Material"), tr("Qty/ea"), tr("Unit price"), tr("Buy qty"), tr("Line cost")]
+        )
+        self.venue_label.setText(tr("Sell venue:"))
+        self.venue_combo.setItemText(0, tr("City listing (6.5% tax)"))
+        self.venue_combo.setItemText(1, tr("Black Market (4% tax)"))
+        self.sell_label.setText(tr("Sell price:"))
+        self._build_table()  # re-localize material names + [artifact] tag
+        self.recompute()
+
+
+class CraftCalcTab(QWidget):
+    """Manual-price crafting calculator (Nendys-style), one tab per enchant level.
+
+    Search lists each craftable item by TIER only (4–8). Pick one and a sub-tab
+    opens for every enchant level that has a recipe (e.g. 5, 5.1, 5.2, 5.3, 5.4),
+    each a self-contained CraftCalcEnchantPanel. Type material prices (or press
+    Fetch to pull live prices for all levels at once) and the sell price; craft
+    cost / profit / ROI update live. The shared return rate (refunds returnable
+    materials, never artifacts) and batch size drive every tab.
+    """
+
     INFO = (
-        "Set the market prices yourself. Pick a craftable item, set how many pieces to "
-        "craft, and type each material's buy price — craft cost, income, profit and ROI "
-        "update as you type. The return rate refunds returnable materials, so you buy "
-        "fewer of them (Buy qty); artifacts and relics (flagged) are never refunded and "
-        "cost full count. Prices are remembered per material across items. Station fees "
-        "are not modelled."
+        "Pick a craftable item — the search lists each tier (4–8). Double-click one and a "
+        "tab opens for every enchant level (e.g. 5, 5.1, 5.2…). In each tab set the "
+        "materials' buy price (or press Fetch to pull live prices for all levels) and the "
+        "sell price; craft cost, profit and ROI update as you type. The return rate refunds "
+        "returnable materials, so you buy fewer; artifacts and relics (flagged) are never "
+        "refunded. Prices are remembered per material. Station fees are not modelled."
     )
 
     def __init__(self):
         super().__init__()
-        self._item_id = None
-        self._materials: list[dict] = []  # current recipe materials
-        self._price_spins: dict[str, QSpinBox] = {}
-        self._building = False  # guard recompute while (re)building the table
+        self._panels: list[CraftCalcEnchantPanel] = []  # one per enchant level
+        self._fetch_worker = None  # live-price fetch (auto-fill), guarded
 
         layout = QVBoxLayout(self)
         self.info_label = QLabel(tr(self.INFO))
@@ -2530,60 +2780,40 @@ class CraftCalcTab(QWidget):
         runs_row.addStretch()
         layout.addLayout(runs_row)
 
-        # Materials table — only the Unit price column is editable.
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(
-            [tr("Material"), tr("Qty/ea"), tr("Unit price"), tr("Buy qty"), tr("Line cost")]
+        # Auto-fill prices from the live market (still editable afterwards).
+        fetch_row = QHBoxLayout()
+        self.fetch_city_label = QLabel(tr("Buy materials in:"))
+        fetch_row.addWidget(self.fetch_city_label)
+        self.fetch_city_combo = QComboBox()
+        self.fetch_city_combo.addItem(tr("Cheapest royal city"), "__cheapest__")
+        for city in CITIES:
+            self.fetch_city_combo.addItem(tr(city), city)
+        saved_fc = settings.value("craftcalc/fetch_city", "__cheapest__")
+        fci = self.fetch_city_combo.findData(saved_fc)
+        self.fetch_city_combo.setCurrentIndex(fci if fci >= 0 else 0)
+        self.fetch_city_combo.currentTextChanged.connect(
+            lambda *_: settings.setValue(
+                "craftcalc/fetch_city", self.fetch_city_combo.currentData()
+            )
         )
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionMode(QTableWidget.NoSelection)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table)
+        fetch_row.addWidget(self.fetch_city_combo)
+        self.fetch_btn = QPushButton(tr("Fetch market prices"))
+        self.fetch_btn.clicked.connect(self._on_fetch)
+        fetch_row.addWidget(self.fetch_btn)
+        self.fetch_status = QLabel("")
+        self.fetch_status.setStyleSheet("color: #888888;")
+        fetch_row.addWidget(self.fetch_status)
+        fetch_row.addStretch()
+        layout.addLayout(fetch_row)
 
-        # Sell side.
-        sell_row = QHBoxLayout()
-        self.venue_label = QLabel(tr("Sell venue:"))
-        sell_row.addWidget(self.venue_label)
-        self.venue_combo = QComboBox()
-        self.venue_combo.addItem(tr("City listing (6.5% tax)"), "city")
-        self.venue_combo.addItem(tr("Black Market (4% tax)"), "bm")
-        saved_venue = settings.value("craftcalc/venue", "city")
-        vidx = self.venue_combo.findData(saved_venue)
-        self.venue_combo.setCurrentIndex(vidx if vidx >= 0 else 0)
-        self.venue_combo.currentTextChanged.connect(self._on_sell_changed)
-        sell_row.addWidget(self.venue_combo)
-
-        sell_row.addSpacing(10)
-        self.sell_label = QLabel(tr("Sell price:"))
-        sell_row.addWidget(self.sell_label)
-        self.sell_spin = QSpinBox()
-        self.sell_spin.setRange(0, self.PRICE_MAX)
-        self.sell_spin.setSingleStep(100)
-        self.sell_spin.setGroupSeparatorShown(True)
-        self.sell_spin.valueChanged.connect(self._on_sell_changed)
-        sell_row.addWidget(self.sell_spin)
-        sell_row.addStretch()
-        layout.addLayout(sell_row)
-
-        # Summary line.
-        summary = QHBoxLayout()
-        self.cost_label = QLabel(tr("Craft cost: —"))
-        self.net_label = QLabel(tr("Total income: —"))
-        self.profit_label = QLabel(tr("Profit: —"))
-        self.profit_label.setStyleSheet("font-weight: bold;")
-        self.unit_profit_label = QLabel(tr("Profit/unit: —"))
-        self.roi_label = QLabel(tr("ROI: —"))
-        for w in (self.cost_label, self.net_label, self.profit_label, self.unit_profit_label, self.roi_label):
-            summary.addWidget(w)
-            summary.addSpacing(20)
-        summary.addStretch()
-        layout.addLayout(summary)
+        # One sub-tab per enchant level of the picked item (built on selection).
+        self.enchant_tabs = QTabWidget()
+        layout.addWidget(self.enchant_tabs)
 
         self._update_rate_label()
         last = settings.value("craftcalc/last_item", "")
         if last and recipes.has_recipe(last):
-            self._load_recipe(last)
+            self._load_item(last)
 
     # ----- return rate -----
     def _return_rate(self) -> float:
@@ -2599,158 +2829,124 @@ class CraftCalcTab(QWidget):
     def _on_rate_changed(self):
         self._update_rate_label()
         self.save_state()
-        self._recompute()
+        self._recompute_all()
+
+    def _recompute_all(self):
+        for p in self._panels:
+            p.recompute()
 
     # ----- search / pick -----
     def _on_search(self, text):
+        # base_only → one entry per tier (enchant variants become sub-tabs on pick).
         self.results_list.clear()
-        for iid in names.search_ids(text):
+        for iid in names.search_ids(text, base_only=True):
             meta = names.parse_id(iid)
-            label = f"{names.get_name(iid)}  (T{meta['tier']}.{meta['enchant']})"
+            label = f"{names.get_name(iid)}  (T{meta['tier']})"
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, iid)
             self.results_list.addItem(item)
 
     def _on_pick(self, item):
         if item is not None:
-            self._load_recipe(item.data(Qt.UserRole))
+            self._load_item(item.data(Qt.UserRole))
 
-    def _load_recipe(self, iid: str):
-        rec = recipes.get_recipe(iid)
-        meta = names.parse_id(iid)
-        tier_txt = f"T{meta['tier']}.{meta['enchant']}" if meta else "?"
-        if not rec:
-            self._item_id = None
-            self._materials = []
-            self._price_spins = {}
-            self.table.setRowCount(0)
+    def _load_item(self, base_id: str):
+        """Open one sub-tab per enchant level (0–4) of the picked item that has a recipe."""
+        base = base_id.split("@")[0]
+        meta = names.parse_id(base)
+        if not meta:
+            return
+        tier = meta["tier"]
+        variants = []
+        for ench in range(5):
+            vid = base if ench == 0 else f"{base}@{ench}"
+            rec = recipes.get_recipe(vid)
+            if rec:
+                variants.append((ench, vid, rec))
+
+        self.enchant_tabs.clear()
+        self._panels = []
+        name = names.get_name(base)
+        if not variants:
             self.selected_label.setText(
-                tr("{name} ({tier}) — no known recipe.").format(name=names.get_name(iid), tier=tier_txt)
+                tr("{name} ({tier}) — no known recipe.").format(name=name, tier=f"T{tier}")
             )
-            self._recompute()
             return
 
-        self._item_id = iid
-        self._materials = rec["materials"]
+        for ench, vid, rec in variants:
+            panel = CraftCalcEnchantPanel(self, vid, rec["materials"])
+            self._panels.append(panel)
+            self.enchant_tabs.addTab(panel, str(tier) if ench == 0 else f"{tier}.{ench}")
+
         self.selected_label.setText(
-            tr("Selected: {name}  ({tier})").format(name=names.get_name(iid), tier=tier_txt)
+            tr("Selected: {name} ({tier}) — {n} enchant levels").format(
+                name=name, tier=f"T{tier}", n=len(variants)
+            )
         )
+        settings.setValue("craftcalc/last_item", base)
 
-        self._building = True
-        self._price_spins = {}
-        self.table.setRowCount(len(self._materials))
-        for row, m in enumerate(self._materials):
-            name = names.get_name(m["id"])
-            if not m["ret"]:
-                name += tr("  [artifact]")
-            name_item = QTableWidgetItem(name)
-            name_item.setToolTip(m["id"])
-            self.table.setItem(row, 0, name_item)
-
-            qty_item = QTableWidgetItem(str(m["count"]))
-            qty_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.table.setItem(row, 1, qty_item)
-
-            spin = QSpinBox()
-            spin.setRange(0, self.PRICE_MAX)
-            spin.setSingleStep(100)
-            spin.setGroupSeparatorShown(True)
-            spin.setValue(int(settings.value(f"craftcalc/price/{m['id']}", 0)))
-            spin.valueChanged.connect(lambda v, mid=m["id"]: self._on_price_changed(mid, v))
-            self.table.setCellWidget(row, 2, spin)
-            self._price_spins[m["id"]] = spin
-
-            buy_item = QTableWidgetItem("")
-            buy_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.table.setItem(row, 3, buy_item)
-
-            cost_item = QTableWidgetItem("")
-            cost_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.table.setItem(row, 4, cost_item)
-
-        # Reload this item's saved sell price without firing a recompute mid-build.
-        self.sell_spin.blockSignals(True)
-        self.sell_spin.setValue(int(settings.value(f"craftcalc/sell/{iid}", 0)))
-        self.sell_spin.blockSignals(False)
-
-        settings.setValue("craftcalc/last_item", iid)
-        self._building = False
-        self._recompute()
-
-    # ----- price / sell edits -----
-    def _on_price_changed(self, material_id: str, value: int):
-        settings.setValue(f"craftcalc/price/{material_id}", value)
-        self._recompute()
-
+    # ----- batch size -----
     def _on_runs_changed(self, *_):
         settings.setValue("craftcalc/runs", self.runs_spin.value())
-        self._recompute()
+        self._recompute_all()
 
-    def _on_sell_changed(self, *_):
-        settings.setValue("craftcalc/venue", self.venue_combo.currentData())
-        if self._item_id:
-            settings.setValue(f"craftcalc/sell/{self._item_id}", self.sell_spin.value())
-        self._recompute()
-
-    def _recompute(self):
-        if self._building:
+    # ----- live-price fetch (auto-fill, all enchant tabs in one batch) -----
+    def _on_fetch(self):
+        if not self._panels:
+            self.fetch_status.setStyleSheet("color: #c62828;")
+            self.fetch_status.setText(tr("Select an item first."))
             return
-        rr = self._return_rate()
-        runs = self.runs_spin.value()
-        craft_cost = 0
-        for row, m in enumerate(self._materials):
-            price = self._price_spins[m["id"]].value()
-            # Relics/artifacts (ret=False) are never refunded — full count. Returnable
-            # materials are scaled by (1 - return rate); buy whole units (round up).
-            needed = m["count"] * runs * (1 - rr) if m["ret"] else m["count"] * runs
-            buy_qty = ceil(needed - 1e-9)
-            line = buy_qty * price
-            craft_cost += line
-
-            buy_item = self.table.item(row, 3)
-            buy_item.setText(_fmt_silver(buy_qty))
-            leftover = buy_qty - needed
-            if m["ret"] and leftover > 0.01:
-                buy_item.setToolTip(
-                    tr("Need ~{needed}; buy {buy} (≈{leftover} leftover)").format(
-                        needed=f"{needed:.1f}", buy=f"{buy_qty:,}", leftover=f"{leftover:.1f}"
-                    )
-                )
-            else:
-                buy_item.setToolTip("")
-            self.table.item(row, 4).setText(_fmt_silver(line))
-
-        if not self._materials:
-            self.cost_label.setText(tr("Craft cost: —"))
-            self.net_label.setText(tr("Total income: —"))
-            self.profit_label.setText(tr("Profit: —"))
-            self.unit_profit_label.setText(tr("Profit/unit: —"))
-            self.roi_label.setText(tr("ROI: —"))
-            self.profit_label.setStyleSheet("font-weight: bold;")
+        if self._fetch_worker is not None:  # a fetch is already running
             return
+        data = self.fetch_city_combo.currentData()
+        cities = [c for c in CITIES if c != "Caerleon"] if data == "__cheapest__" else [data]
+        items = [(p.item_id, [m["id"] for m in p.materials]) for p in self._panels]
 
-        tax = BM_TAX if self.venue_combo.currentData() == "bm" else SELL_ORDER_TAX
-        income = self.sell_spin.value() * (1 - tax) * runs
-        profit = income - craft_cost
-        roi = profit / craft_cost if craft_cost > 0 else None
+        self.fetch_btn.setEnabled(False)
+        self.fetch_status.setStyleSheet("color: #888888;")
+        self.fetch_status.setText(tr("Fetching prices…"))
+        worker = CraftCalcFetchWorker(items, cities)
+        worker.finished_ok.connect(self._on_fetched)
+        worker.failed.connect(self._on_fetch_failed)
+        worker.finished.connect(self._fetch_cleanup)
+        self._fetch_worker = worker
+        worker.start()
 
-        self.cost_label.setText(tr("Craft cost: {v}").format(v=_fmt_silver(int(round(craft_cost)))))
-        self.net_label.setText(tr("Total income: {v}").format(v=_fmt_silver(int(round(income)))))
-        self.profit_label.setText(tr("Profit: {v}").format(v=_fmt_silver(int(round(profit)))))
-        self.unit_profit_label.setText(
-            tr("Profit/unit: {v}").format(v=_fmt_silver(int(round(profit / runs))))
+    def _fetch_cleanup(self):
+        self._fetch_worker = None
+        self.fetch_btn.setEnabled(True)
+
+    def _on_fetch_failed(self, err: str):
+        self.fetch_status.setStyleSheet("color: #c62828;")
+        self.fetch_status.setText(tr("Fetch failed: {err}").format(err=err))
+
+    def _on_fetched(self, result: dict):
+        filled = missing = stale = sell_missing = 0
+        for p in self._panels:
+            c = p.apply_fetch(result.get(p.item_id, {}))
+            filled += c["filled"]
+            missing += c["missing"]
+            stale += c["stale"]
+            sell_missing += c["sell_missing"]
+
+        total = filled + missing
+        msg = tr("Updated {n} of {total} materials across {tabs} tabs.").format(
+            n=filled, total=total, tabs=len(self._panels)
         )
-        color = "#2e7d32" if profit > 0 else ("#c62828" if profit < 0 else "#888888")
-        self.profit_label.setStyleSheet(f"font-weight: bold; color: {color};")
-        self.roi_label.setText(
-            tr("ROI: —") if roi is None else tr("ROI: {pct}%").format(pct=f"{roi * 100:.1f}")
-        )
+        if missing:
+            msg += " " + tr("{n} not listed — left unchanged.").format(n=missing)
+        if stale:
+            msg += " " + tr("{n} use old data (hover to check).").format(n=stale)
+        if sell_missing:
+            msg += " " + tr("{n} tabs have no sell price.").format(n=sell_missing)
+        bad = missing or stale or sell_missing
+        self.fetch_status.setStyleSheet("color: #c62828;" if bad else "color: #2e7d32;")
+        self.fetch_status.setText(msg)
 
     def save_state(self):
         settings.setValue("craftcalc/spec", self.spec_cb.isChecked())
         settings.setValue("craftcalc/focus", self.focus_cb.isChecked())
         settings.setValue("craftcalc/bonus_day", self.bonus_combo.currentData())
-        settings.setValue("craftcalc/venue", self.venue_combo.currentData())
 
     def retranslate(self):
         """Re-apply all visible strings in the current language (live toggle)."""
@@ -2763,19 +2959,25 @@ class CraftCalcTab(QWidget):
             self.bonus_combo.setItemText(i, tr(self.bonus_combo.itemData(i)))
         self.search_box.setPlaceholderText(tr("Type an item name, e.g. Broadsword, Mercenary Jacket…"))
         self.runs_label.setText(tr("Pieces to craft:"))
-        self.table.setHorizontalHeaderLabels(
-            [tr("Material"), tr("Qty/ea"), tr("Unit price"), tr("Buy qty"), tr("Line cost")]
-        )
-        self.venue_label.setText(tr("Sell venue:"))
-        self.venue_combo.setItemText(0, tr("City listing (6.5% tax)"))
-        self.venue_combo.setItemText(1, tr("Black Market (4% tax)"))
-        self.sell_label.setText(tr("Sell price:"))
-        self._update_rate_label()
-        if self._item_id and self._materials:
-            self._load_recipe(self._item_id)  # rebuilds rows + selected label translated
+        self.fetch_city_label.setText(tr("Buy materials in:"))
+        for i in range(self.fetch_city_combo.count()):
+            self.fetch_city_combo.setItemText(i, tr(self.fetch_city_combo.itemData(i)
+                                                    if self.fetch_city_combo.itemData(i) != "__cheapest__"
+                                                    else "Cheapest royal city"))
+        self.fetch_btn.setText(tr("Fetch market prices"))
+        if self._panels:
+            base = self._panels[0].item_id.split("@")[0]
+            meta = names.parse_id(base)
+            tier = meta["tier"] if meta else 0
+            self.selected_label.setText(
+                tr("Selected: {name} ({tier}) — {n} enchant levels").format(
+                    name=names.get_name(base), tier=f"T{tier}", n=len(self._panels)
+                )
+            )
+            for p in self._panels:
+                p.retranslate()
         else:
             self.selected_label.setText(tr("No item selected — double-click a search result."))
-        self._recompute()
 
 
 class MainWindow(QMainWindow):

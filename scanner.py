@@ -893,3 +893,64 @@ async def scan_craft(
     # Most profitable first; incomplete rows (profit None) sink to the bottom.
     results.sort(key=lambda r: (r["profit"] is not None, r["profit"] or 0), reverse=True)
     return results
+
+
+# The manual Craft calc only wants a starting price the user can then correct, so
+# it accepts much older data than the automated scanners (which need fresh prices
+# to trust a profit number). The fill shows each price's age so staleness is
+# visible; the user judges and overrides.
+CRAFTCALC_MAX_AGE_SECONDS = 14 * 24 * 60 * 60  # 14 days
+
+
+async def fetch_craft_prices(
+    items: list[tuple[str, list[str]]],
+    cities: list[str],
+    max_age_seconds: int = CRAFTCALC_MAX_AGE_SECONDS,
+) -> dict:
+    """Batch live prices to auto-fill the manual Craft calc tabs.
+
+    `items` is a list of (crafted_id, [material_ids]) — typically one entry per
+    enchant level of the same gear. A single network fetch covers every id.
+    Returns {crafted_id: {
+        "materials": {mat_id: {"price","city","age"} | None},  # cheapest buy
+        "sell_city": {"price","city","age"} | None,            # highest sane listing
+        "sell_bm":   {"price","city","age"} | None,            # Black Market sell
+    }}. Both sell venues are returned so each tab picks the one it's set to. The
+    tab applies the return rate, taxes and batch sizing; the user can override any
+    field. Prices up to `max_age_seconds` old are returned with their age (this is
+    a manual tool, so staleness is shown rather than hidden).
+    """
+    all_ids: set[str] = set()
+    for crafted_id, material_ids in items:
+        all_ids.add(crafted_id)
+        all_ids.update(material_ids)
+    rows = await fetch_prices(list(all_ids), list({*cities, BLACK_MARKET}))
+    idx = index_rows(rows, quality=1)
+    now = datetime.now(timezone.utc)
+
+    out: dict[str, dict] = {}
+    for crafted_id, material_ids in items:
+        mats: dict[str, dict | None] = {}
+        for mid in material_ids:
+            cs = _cheapest_sell(idx, mid, cities, now, max_age_seconds)
+            mats[mid] = (
+                {"price": int(round(cs["price"])), "city": cs["city"], "age": cs["age"]}
+                if cs
+                else None
+            )
+        listing = _highest_listing(idx, crafted_id, cities, now, max_age_seconds)
+        sell_city = (
+            {"price": int(round(listing["price"])), "city": listing["city"], "age": listing["age"]}
+            if listing
+            else None
+        )
+        bm_row = idx.get((crafted_id, BLACK_MARKET))
+        bm_price = (bm_row or {}).get("buy_price_max") or 0
+        bm_age = age_seconds(bm_row, "buy_price_max_date", now) if bm_row else None
+        sell_bm = (
+            {"price": int(round(bm_price)), "city": BLACK_MARKET, "age": bm_age}
+            if (bm_price > 0 and bm_age is not None and bm_age <= max_age_seconds)
+            else None
+        )
+        out[crafted_id] = {"materials": mats, "sell_city": sell_city, "sell_bm": sell_bm}
+    return out

@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 
 import i18n
 
@@ -87,27 +88,43 @@ def gear_ids() -> list[str]:
     return list(_GEAR_IDS)
 
 
-def search_ids(query: str, limit: int = 60) -> list[str]:
-    """Gear ids whose name (or id) contains `query`, case-insensitive.
+def _norm(s: str) -> str:
+    """Lowercase and strip accents so 'espadon' matches 'Espadón'.
+
+    Many players type without accents, so searches are compared accent-folded on
+    both sides (query and item name).
+    """
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s.lower())
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def search_ids(query: str, limit: int = 60, base_only: bool = False) -> list[str]:
+    """Gear ids whose name (or id) contains `query`, accent- and case-insensitive.
 
     Matches the localized display name, the English name, AND the id, so a
-    Spanish user can search in Spanish while English/id searches still work.
-    Sorted by the display name, then tier, then enchant so each tier/enchant
-    variant lists in a predictable order for the picker.
+    Spanish user can search in Spanish (with or without accents) while English/id
+    searches still work. Sorted by the display name, then tier, then enchant so
+    each tier/enchant variant lists in a predictable order for the picker. When
+    `base_only` is True only enchant-0 ids are returned — one entry per tier,
+    used by the Craft calc tab which then opens a tab per enchant level.
     """
     _load()
     es_mode = i18n.get_lang() == "es"
     if es_mode:
         _load_es()
-    q = query.strip().lower()
+    q = _norm(query.strip())
     if not q:
         return []
     matches = []
     for iid in _GEAR_IDS:
+        meta = parse_id(iid)
+        if base_only and meta and meta["enchant"] != 0:
+            continue
         english = _NAMES.get(iid, iid)
         display = _NAMES_ES.get(iid, english) if es_mode else english
-        if q in display.lower() or q in english.lower() or q in iid.lower():
-            meta = parse_id(iid)
+        if q in _norm(display) or q in _norm(english) or q in _norm(iid):
             matches.append((display, meta["tier"] if meta else 0,
                             meta["enchant"] if meta else 0, iid))
     matches.sort(key=lambda t: (t[0], t[1], t[2]))

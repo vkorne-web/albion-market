@@ -43,19 +43,25 @@ ES: dict[str, str] = {
     "Use focus (+59)": "Usar enfoque (+59)",
     "Return rate: {pct}%": "Tasa de devolución: {pct}%",
     # --- Craft calc tab ---
-    "Set the market prices yourself. Pick a craftable item, set how many pieces to "
-    "craft, and type each material's buy price — craft cost, income, profit and ROI "
-    "update as you type. The return rate refunds returnable materials, so you buy "
-    "fewer of them (Buy qty); artifacts and relics (flagged) are never refunded and "
-    "cost full count. Prices are remembered per material across items. Station fees "
-    "are not modelled.":
-        "Tú pones los precios del mercado. Elige un objeto fabricable, indica cuántas "
-        "piezas fabricar y escribe el precio de compra de cada material: el coste de "
-        "fabricación, los ingresos, la ganancia y el ROI se actualizan al escribir. La "
-        "tasa de devolución reembolsa los materiales retornables, así que compras menos "
-        "(Cant. a comprar); los artefactos y reliquias (marcados) nunca se reembolsan y "
-        "cuestan la cantidad completa. Los precios se recuerdan por material entre "
-        "objetos. No se incluyen las tarifas de estación.",
+    "Pick a craftable item — the search lists each tier (4–8). Double-click one and a "
+    "tab opens for every enchant level (e.g. 5, 5.1, 5.2…). In each tab set the "
+    "materials' buy price (or press Fetch to pull live prices for all levels) and the "
+    "sell price; craft cost, profit and ROI update as you type. The return rate refunds "
+    "returnable materials, so you buy fewer; artifacts and relics (flagged) are never "
+    "refunded. Prices are remembered per material. Station fees are not modelled.":
+        "Elige un objeto fabricable — la búsqueda lista cada tier (4–8). Haz doble clic en "
+        "uno y se abre una pestaña por cada nivel de encantamiento (p. ej. 5, 5.1, 5.2…). "
+        "En cada pestaña pon el precio de compra de los materiales (o pulsa Obtener para "
+        "traer precios en vivo de todos los niveles) y el precio de venta; el coste, la "
+        "ganancia y el ROI se actualizan al escribir. La tasa de devolución reembolsa los "
+        "materiales retornables, así que compras menos; los artefactos y reliquias "
+        "(marcados) nunca se reembolsan. Los precios se recuerdan por material. No se "
+        "incluyen las tarifas de estación.",
+    "Selected: {name} ({tier}) — {n} enchant levels":
+        "Seleccionado: {name} ({tier}) — {n} niveles de encantamiento",
+    "Updated {n} of {total} materials across {tabs} tabs.":
+        "Actualizados {n} de {total} materiales en {tabs} pestañas.",
+    "{n} tabs have no sell price.": "{n} pestañas sin precio de venta.",
     "Type an item name, e.g. Broadsword, Mercenary Jacket…":
         "Escribe el nombre de un objeto, p. ej. Espadón, Chaqueta de mercenario…",
     "No item selected — double-click a search result.":
@@ -63,6 +69,20 @@ ES: dict[str, str] = {
     "Selected: {name}  ({tier})": "Seleccionado: {name}  ({tier})",
     "{name} ({tier}) — no known recipe.": "{name} ({tier}) — receta desconocida.",
     "Pieces to craft:": "Piezas a fabricar:",
+    "Buy materials in:": "Comprar materiales en:",
+    "Cheapest royal city": "Ciudad real más barata",
+    "Fetch market prices": "Obtener precios del mercado",
+    "Select an item first.": "Primero selecciona un objeto.",
+    "Fetching prices…": "Obteniendo precios…",
+    "Fetch failed: {err}": "Fallo al obtener: {err}",
+    "{city} · {age} old": "{city} · hace {age}",
+    "(check this — old data)": "(revísalo — dato viejo)",
+    "Updated {n} of {total} materials.": "Actualizados {n} de {total} materiales.",
+    "{n} not listed — left unchanged.": "{n} sin listar — sin cambiar.",
+    "{n} use old data (hover to check).":
+        "{n} con datos viejos (pasa el ratón para revisar).",
+    "No sell price found — enter it manually.":
+        "Sin precio de venta — escríbelo a mano.",
     "Material": "Material",
     "Qty/ea": "Cant./u",
     "Unit price": "Precio unitario",
